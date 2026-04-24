@@ -5,7 +5,7 @@
   <g font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">
     <text x="40" y="28" textLength="604.8" lengthAdjust="spacingAndGlyphs" fill="#64ff8c"> RM -RF 'EM ALL   Enemies: 3/3   ARROWS move/turn   SPACE shoot   Q quit</text>
 
-    <text x="342.4" y="64" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#d74141">_-</text>
+    <text x="334" y="64" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#d74141">_-</text>
 
     <text x="40" y="82" textLength="168" lengthAdjust="spacingAndGlyphs" fill="#b9a57d">++++++++++++++++++++</text>
     <text x="334" y="82" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#d74141">._\</text>
@@ -19,9 +19,9 @@
     <text x="342.4" y="118" textLength="302.4" lengthAdjust="spacingAndGlyphs" fill="#b9a57d">++++++++++++++++++++++++++++++++++++</text>
 
     <text x="40" y="136" textLength="151.2" lengthAdjust="spacingAndGlyphs" fill="#b9a57d">++++++++++++++++++</text>
-    <text x="342.4" y="136" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#d74141">|\</text>
+    <text x="334" y="136" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#d74141">|\</text>
 
-    <text x="342.4" y="154" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#d74141">\</text>
+    <text x="334" y="154" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#d74141">\</text>
 
     <text x="199.6" y="202" textLength="277.2" lengthAdjust="spacingAndGlyphs" fill="#ffe664">&gt;&gt; Kill 'em all. rm -rf 'em hard.</text>
   </g>

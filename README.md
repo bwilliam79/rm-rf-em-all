@@ -11,26 +11,9 @@ a **runtime-generated 8-bit chiptune**, and developer humor instead of taste.
 (With an obnoxious square-wave theme song playing on a loop. Press ENTER
 to start the game and mercifully end the music.)
 
-```
-                     ____  __  __      ____  _____
-                    |  _ \|  \/  |    |  _ \|  ___|
-                    | |_) | |\/| |    | |_) | |_
-                    |  _ <| |  | |    |  _ <|  _|
-                    |_| \_\_|  |_|    |_| \_\_|
+![splash screen: RM -RF 'EM ALL banner fading red -> yellow -> green](docs/splash.svg)
 
-                     ___ __  __       _    _     _
-                    | __|  \/  |     / \  | |   | |
-                    | _|| |\/| |    / _ \ | |   | |
-                    |___|_|  |_|   /_/ \_\|___|_|_|
-
-                A terminal FPS for the terminally online.
-         Built in Python. Runs in your shell. Smells like a burned CPU.
-
-         [ press ENTER to rm -rf em all   //   press Q to chicken out ]
-```
-
-*(In your terminal the banner fades through a warm red -> yellow -> green
-gradient and the bottom prompt blinks. Code blocks eat the color.)*
+*(In your real terminal the bottom prompt also blinks; this is a static snapshot.)*
 
 ### In-game
 
@@ -38,21 +21,10 @@ Close-up on an enemy down the hall. Crosshair is the `+`, the enemy's
 sprite is the little pile of punctuation in the middle, and the walls get
 denser (`.` -> `+` -> `%` -> `#`) as they get closer.
 
-```
- RM -RF 'EM ALL   Enemies: 3/3   ARROWS move/turn   SPACE shoot   Q quit
+![in-game: tan walls, red enemy sprite ahead, green HUD, yellow taunt](docs/ingame.svg)
 
-                                    _-
-++++++++++++++++++++               ._\
-+++++++++++++++++++++++++++++++++++o.|++++++++++++++++++++++++++++++++++
-+++++++++++++++++++++++++++++++++++/++++++++++++++++++++++++++++++++++++
-++++++++++++++++++                  |\
-                                    \
-
-                   >> Kill 'em all. rm -rf 'em hard.
-```
-
-*(In a truecolor terminal: walls are tan, ceiling blue-grey, floor brown,
-enemy bright red, crosshair yellow, HUD green.)*
+*(Walls are tan, ceiling blue-grey, floor brown, enemy red, HUD green,
+taunt yellow. The real game shades walls and enemies by distance.)*
 
 ## What it is
 

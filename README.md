@@ -73,9 +73,10 @@ truecolor, and a pile of dumb taunts. Crude on purpose.
 python3 game.py
 ```
 
-On first launch the game generates a ~15-second square-wave theme WAV in
-your temp dir and loops it during the splash screen. Press **ENTER** to
-start the game (music stops), or **Q** to chicken out.
+On first launch the game generates an ~11-second palm-muted tritone riff
+(square wave + power-chord fifth, E2 root, ~176 bpm gallop) in your temp
+dir and loops it during the splash. Press **ENTER** to start the game
+(music stops), or **Q** to chicken out.
 
 ## Controls
 
@@ -100,6 +101,11 @@ rm -rf em-all
 
 ## Status
 
+**v0.3** -- DDA raycaster (render is ~40x faster, ~0.8ms per frame at
+80x24), arrow keys drained per frame so inputs stop queueing up, and the
+theme got a lobotomy: dropped an octave to E2, switched to palm-muted
+sixteenth-note gallops with tritone stabs and power-chord fifths for
+something that at least *rhymes* with death metal.
+
 **v0.2** -- color rendering, arrow-key controls, animated splash screen,
-and a runtime-generated chiptune theme. Next up, maybe: more enemy types,
-better sprites, real gunshot WAVs, cross-platform audio.
+and a runtime-generated chiptune theme.

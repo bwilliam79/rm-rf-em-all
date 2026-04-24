@@ -144,27 +144,46 @@ def play(name):
 
 
 def generate_theme(path):
-    """Write an obnoxious 8-bit square-wave chiptune to `path`."""
-    SR = 22050
-    NOTE_DUR = 0.16
-    VOL = 4500  # out of 32767 -- keep it quiet-ish
+    """Write a palm-muted, tritone-soaked square-wave riff to `path`.
 
+    Death-metal-adjacent (as adjacent as one square-wave voice can get):
+      * Low register: E2 root (82 Hz) for gut-punch weight
+      * Power-chord feel: root mixed with a perfect fifth
+      * Palm-mute envelope: sharp attack, fast decay, simulates chugging
+      * Tritones (E vs Bb) for the Slayer-flavored evil
+      * Fast 16th-note gallop tempo
+    """
+    SR = 22050
+    NOTE_DUR = 0.085   # ~176 bpm sixteenth notes -- fast gallop
+    VOL = 5800
+    FIFTH_VOL = 3100   # mixed softer than root
+
+    # Low-octave, chromatic-heavy palette
     NOTES = {
-        "C": 261.63, "D": 293.66, "E": 329.63, "F": 349.23,
-        "G": 392.00, "A": 440.00, "B": 493.88,
-        "c": 523.25, "d": 587.33, "e": 659.25, "f": 698.46,
-        "g": 783.99, "a": 880.00,
+        "E": 82.41,    # E2  (root)
+        "F": 87.31,    # F2  (evil minor 2nd)
+        "G": 98.00,    # G2  (minor 3rd)
+        "A": 110.00,   # A2  (4th)
+        "b": 116.54,   # Bb2 (TRITONE, the devil's interval)
+        "B": 123.47,   # B2  (5th, for a breath of tonality)
+        "C": 130.81,   # C3
+        "D": 146.83,   # D3
+        "e": 164.81,   # E3  (octave up for bite)
+        "f": 174.61,
+        "g": 196.00,
         "-": 0.0,
     }
 
-    # Aggressive retro arpeggio loop. Vaguely Duke-Nukem-adjacent. Shitty.
+    # Palm-muted gallop riff. Lots of E, chromatic slides, tritone stabs.
     SONG = (
-        "C-E-G-c-E-G-c-e-"
-        "c-G-E-C-G-E-C-C-"
-        "F-A-c-F-A-c-F-f-"
-        "c-A-F-C-G-E-C---"
-        "C-C-G-G-E-E-C-C-"
-        "D-D-A-A-F-F-D-D-"
+        "EEEFEEEE" "EEEFEEbE"    # gallop + chromatic slide + tritone
+        "EEEGEEEE" "EEEbEEbE"    # minor 3rd then tritone wall
+        "EFGFEDEF" "bAGFEFGA"    # chromatic runs
+        "EEEEEEEE" "EbEbEEEE"    # tremolo + tritone blast
+        "eEeEeEeE" "EFEFEFEF"    # octave stabs + minor 2nd
+        "bGEbGEbG" "EDEFGFED"    # tritone + chromatic lead
+        "EEEEEEEE" "EEbEFGEE"    # tremolo wall
+        "EFGFEDEF" "EEEEEEEE"    # descending run + blast finale
     )
 
     samples = array.array("h")
@@ -174,12 +193,39 @@ def generate_theme(path):
         if freq <= 0:
             samples.extend([0] * n)
             continue
-        period_i = max(2, int(round(SR / freq)))
-        half = period_i // 2
-        one_period = [VOL] * half + [-VOL] * (period_i - half)
-        full = n // period_i
-        rem = n - full * period_i
-        samples.extend(one_period * full + one_period[:rem])
+
+        # Root square wave
+        root_p = max(2, int(round(SR / freq)))
+        root_half = root_p // 2
+        root_one = [VOL] * root_half + [-VOL] * (root_p - root_half)
+        root_full = n // root_p
+        root_rem = n - root_full * root_p
+        root = root_one * root_full + root_one[:root_rem]
+
+        # Perfect fifth (freq * 1.5) -- gives power-chord weight
+        fifth_freq = freq * 1.5
+        fifth_p = max(2, int(round(SR / fifth_freq)))
+        fifth_half = fifth_p // 2
+        fifth_one = [FIFTH_VOL] * fifth_half + [-FIFTH_VOL] * (fifth_p - fifth_half)
+        fifth_full = n // fifth_p
+        fifth_rem = n - fifth_full * fifth_p
+        fifth = fifth_one * fifth_full + fifth_one[:fifth_rem]
+
+        # Palm-mute envelope: fast attack, aggressive decay
+        attack_n = max(1, int(n * 0.015))
+        decay_floor = 0.22  # decays down to this fraction
+        note = array.array("h", [0] * n)
+        inv_tail = 1.0 / max(1, n - attack_n)
+        for i in range(n):
+            if i < attack_n:
+                env = i / attack_n
+            else:
+                env = 1.0 - ((i - attack_n) * inv_tail) * (1.0 - decay_floor)
+            s = int((root[i] + fifth[i]) * env)
+            if s > 32767: s = 32767
+            elif s < -32767: s = -32767
+            note[i] = s
+        samples.extend(note)
 
     with wave.open(path, "wb") as w:
         w.setnchannels(1)
@@ -235,23 +281,30 @@ def get_screen_size():
         return 80, 24
 
 
-def get_key():
-    if not select.select([sys.stdin], [], [], 0)[0]:
-        return None
-    ch = sys.stdin.read(1)
-    if ch == "\x1b":
-        seq = ""
-        for _ in range(2):
-            if select.select([sys.stdin], [], [], 0.01)[0]:
-                seq += sys.stdin.read(1)
-            else:
-                break
-        if seq == "[A": return "UP"
-        if seq == "[B": return "DOWN"
-        if seq == "[C": return "RIGHT"
-        if seq == "[D": return "LEFT"
-        return None
-    return ch
+def get_keys():
+    """Drain every pending keypress. Returns a list (possibly empty).
+
+    Reading one key per frame meant held arrow keys queued up and felt
+    laggy -- this drains the stdin buffer each tick so we keep up.
+    """
+    keys = []
+    while select.select([sys.stdin], [], [], 0)[0]:
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            seq = ""
+            for _ in range(2):
+                if select.select([sys.stdin], [], [], 0.005)[0]:
+                    seq += sys.stdin.read(1)
+                else:
+                    break
+            if seq == "[A": keys.append("UP")
+            elif seq == "[B": keys.append("DOWN")
+            elif seq == "[C": keys.append("RIGHT")
+            elif seq == "[D": keys.append("LEFT")
+            # unknown escape sequences: drop
+        else:
+            keys.append(ch)
+    return keys
 
 # ---- world / game state -------------------------------------------------
 class World:
@@ -291,14 +344,50 @@ class World:
         return row[ix] == "#"
 
     def cast_ray(self, px, py, angle, max_dist=MAX_DEPTH):
-        dx, dy = math.cos(angle), math.sin(angle)
-        d = 0.0
-        step = 0.02
-        while d < max_dist:
-            if self.is_wall(px + dx * d, py + dy * d):
-                return d
-            d += step
-        return max_dist
+        # DDA raycaster -- steps cell-to-cell instead of tiny fixed steps.
+        # Wolfenstein 3D / Lode Runner style. Much faster than the naive loop.
+        dx = math.cos(angle)
+        dy = math.sin(angle)
+        if abs(dx) < 1e-9: dx = 1e-9 if dx >= 0 else -1e-9
+        if abs(dy) < 1e-9: dy = 1e-9 if dy >= 0 else -1e-9
+
+        map_x = int(px)
+        map_y = int(py)
+        delta_x = abs(1.0 / dx)
+        delta_y = abs(1.0 / dy)
+
+        if dx < 0:
+            step_x = -1
+            side_x = (px - map_x) * delta_x
+        else:
+            step_x = 1
+            side_x = (map_x + 1 - px) * delta_x
+        if dy < 0:
+            step_y = -1
+            side_y = (py - map_y) * delta_y
+        else:
+            step_y = 1
+            side_y = (map_y + 1 - py) * delta_y
+
+        last_side = 0
+        for _ in range(200):
+            if side_x < side_y:
+                side_x += delta_x
+                map_x += step_x
+                last_side = 0
+            else:
+                side_y += delta_y
+                map_y += step_y
+                last_side = 1
+            if map_y < 0 or map_y >= len(self.map):
+                return max_dist
+            row = self.map[map_y]
+            if map_x < 0 or map_x >= len(row):
+                return max_dist
+            if row[map_x] == "#":
+                break
+        dist = (side_x - delta_x) if last_side == 0 else (side_y - delta_y)
+        return min(dist, max_dist)
 
     def try_move(self, mx, my):
         buf = 0.2
@@ -578,11 +667,11 @@ def splash(W, H):
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-        k = get_key()
-        if k == "\r" or k == "\n":
-            return True
-        if k in ("q", "Q"):
-            return False
+        for k in get_keys():
+            if k == "\r" or k == "\n":
+                return True
+            if k in ("q", "Q"):
+                return False
         time.sleep(0.05)
 
 # ---- main ---------------------------------------------------------------
@@ -591,7 +680,7 @@ def main():
         print("RM -RF 'EM ALL needs a real terminal. Run it directly.", file=sys.stderr)
         return 1
 
-    theme_path = os.path.join(tempfile.gettempdir(), "rm_rf_em_all_theme_v1.wav")
+    theme_path = os.path.join(tempfile.gettempdir(), "rm_rf_em_all_theme_v2.wav")
     try:
         if not os.path.exists(theme_path):
             generate_theme(theme_path)
@@ -625,27 +714,32 @@ def main():
 
             render(world, W, H)
 
-            k = get_key()
-            if k in ("q", "Q"):
+            quit_flag = False
+            for k in get_keys():
+                if k in ("q", "Q"):
+                    quit_flag = True
+                    break
+                if world.state == "playing":
+                    if k == "UP":
+                        world.try_move(
+                            math.cos(world.player_angle) * MOVE_SPEED,
+                            math.sin(world.player_angle) * MOVE_SPEED,
+                        )
+                    elif k == "DOWN":
+                        world.try_move(
+                            -math.cos(world.player_angle) * MOVE_SPEED,
+                            -math.sin(world.player_angle) * MOVE_SPEED,
+                        )
+                    elif k == "LEFT":
+                        world.player_angle -= TURN_SPEED
+                    elif k == "RIGHT":
+                        world.player_angle += TURN_SPEED
+                    elif k == " ":
+                        world.shoot()
+            if quit_flag:
                 break
-            if world.state == "playing":
-                if k == "UP":
-                    world.try_move(
-                        math.cos(world.player_angle) * MOVE_SPEED,
-                        math.sin(world.player_angle) * MOVE_SPEED,
-                    )
-                elif k == "DOWN":
-                    world.try_move(
-                        -math.cos(world.player_angle) * MOVE_SPEED,
-                        -math.sin(world.player_angle) * MOVE_SPEED,
-                    )
-                elif k == "LEFT":
-                    world.player_angle -= TURN_SPEED
-                elif k == "RIGHT":
-                    world.player_angle += TURN_SPEED
-                elif k == " ":
-                    world.shoot()
 
+            if world.state == "playing":
                 now = time.time()
                 if now - last_enemy_tick > 0.08:
                     world.update_enemies()

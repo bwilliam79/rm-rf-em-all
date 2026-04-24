@@ -284,26 +284,63 @@ def get_screen_size():
 def get_keys():
     """Drain every pending keypress. Returns a list (possibly empty).
 
-    Reading one key per frame meant held arrow keys queued up and felt
-    laggy -- this drains the stdin buffer each tick so we keep up.
+    Uses raw os.read on the fd (not sys.stdin.read) because TextIOWrapper's
+    internal buffering fights with select() and caused dropped arrow keys.
+    Handles both `ESC [ X` (normal) and `ESC O X` (application) cursor modes.
     """
     keys = []
-    while select.select([sys.stdin], [], [], 0)[0]:
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":
-            seq = ""
-            for _ in range(2):
-                if select.select([sys.stdin], [], [], 0.005)[0]:
-                    seq += sys.stdin.read(1)
-                else:
-                    break
-            if seq == "[A": keys.append("UP")
-            elif seq == "[B": keys.append("DOWN")
-            elif seq == "[C": keys.append("RIGHT")
-            elif seq == "[D": keys.append("LEFT")
-            # unknown escape sequences: drop
+    fd = sys.stdin.fileno()
+    data = b""
+    while True:
+        r, _, _ = select.select([fd], [], [], 0)
+        if not r:
+            break
+        try:
+            chunk = os.read(fd, 64)
+        except (BlockingIOError, OSError):
+            break
+        if not chunk:
+            break
+        data += chunk
+
+    # If the buffer ends mid-escape, wait briefly for the rest so we don't
+    # split "\x1b[A" across two frames (which would lose the arrow key).
+    if data.endswith(b"\x1b"):
+        r, _, _ = select.select([fd], [], [], 0.03)
+        if r:
+            try:
+                data += os.read(fd, 8)
+            except (BlockingIOError, OSError):
+                pass
+    if len(data) >= 2 and data[-2] == 0x1b and data[-1] in (0x5b, 0x4f):
+        r, _, _ = select.select([fd], [], [], 0.03)
+        if r:
+            try:
+                data += os.read(fd, 8)
+            except (BlockingIOError, OSError):
+                pass
+
+    i = 0
+    while i < len(data):
+        b = data[i]
+        if b == 0x1b:
+            if i + 1 < len(data) and data[i + 1] in (0x5b, 0x4f):
+                if i + 2 < len(data):
+                    c = data[i + 2]
+                    if c == 0x41: keys.append("UP")
+                    elif c == 0x42: keys.append("DOWN")
+                    elif c == 0x43: keys.append("RIGHT")
+                    elif c == 0x44: keys.append("LEFT")
+                    i += 3
+                    continue
+                i += 2  # partial "ESC [" -- drop both, don't emit bare "["
+                continue
+            i += 1  # lone ESC: drop it
+        elif b < 128:
+            keys.append(chr(b))
+            i += 1
         else:
-            keys.append(ch)
+            i += 1
     return keys
 
 # ---- world / game state -------------------------------------------------
@@ -692,7 +729,9 @@ def main():
     old = termios.tcgetattr(fd)
     try:
         tty.setcbreak(fd)
-        sys.stdout.write("\x1b[2J\x1b[?25l")
+        # \x1b[?25l hides cursor; \x1b[?1l forces normal (not application)
+        # cursor-key mode so arrow keys send ESC [ X, not ESC O X.
+        sys.stdout.write("\x1b[2J\x1b[?25l\x1b[?1l")
         sys.stdout.flush()
 
         if not splash(*get_screen_size()):

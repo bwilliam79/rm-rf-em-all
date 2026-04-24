@@ -1,35 +1,90 @@
 # RM -RF 'EM ALL
 
 A goofy first-person shooter that runs entirely in your terminal.
-Think Wolfenstein 3D, rendered in ASCII, with developer humor instead of taste.
+Wolfenstein 3D rendered in **color ASCII**, with a blinking splash screen,
+a **runtime-generated 8-bit chiptune**, and developer humor instead of taste.
+
+## Screenshots
+
+### Splash screen
+
+(With an obnoxious square-wave theme song playing on a loop. Press ENTER
+to start the game and mercifully end the music.)
+
+```
+                     ____  __  __      ____  _____
+                    |  _ \|  \/  |    |  _ \|  ___|
+                    | |_) | |\/| |    | |_) | |_
+                    |  _ <| |  | |    |  _ <|  _|
+                    |_| \_\_|  |_|    |_| \_\_|
+
+                     ___ __  __       _    _     _
+                    | __|  \/  |     / \  | |   | |
+                    | _|| |\/| |    / _ \ | |   | |
+                    |___|_|  |_|   /_/ \_\|___|_|_|
+
+                A terminal FPS for the terminally online.
+         Built in Python. Runs in your shell. Smells like a burned CPU.
+
+         [ press ENTER to rm -rf em all   //   press Q to chicken out ]
+```
+
+*(In your terminal the banner fades through a warm red -> yellow -> green
+gradient and the bottom prompt blinks. Code blocks eat the color.)*
+
+### In-game
+
+Close-up on an enemy down the hall. Crosshair is the `+`, the enemy's
+sprite is the little pile of punctuation in the middle, and the walls get
+denser (`.` -> `+` -> `%` -> `#`) as they get closer.
+
+```
+ RM -RF 'EM ALL   Enemies: 3/3   ARROWS move/turn   SPACE shoot   Q quit
+
+                                    _-
+++++++++++++++++++++               ._\
++++++++++++++++++++++++++++++++++++o.|++++++++++++++++++++++++++++++++++
++++++++++++++++++++++++++++++++++++/++++++++++++++++++++++++++++++++++++
+++++++++++++++++++                  |\
+                                    \
+
+                   >> Kill 'em all. rm -rf 'em hard.
+```
+
+*(In a truecolor terminal: walls are tan, ceiling blue-grey, floor brown,
+enemy bright red, crosshair yellow, HUD green.)*
 
 ## What it is
 
-A minimal raycaster written in pure-stdlib Python. One room, a few enemies that
-shuffle toward you, one gun with infinite ammo, and a pile of dumb taunts.
-Crude on purpose.
+A minimal raycaster in pure-stdlib Python. One room, a few enemies that
+shuffle toward you, one gun with infinite ammo, color rendering via ANSI
+truecolor, and a pile of dumb taunts. Crude on purpose.
 
 ## Requirements
 
-- **macOS** (uses `afplay` + system sounds so there's zero install)
+- **macOS** (uses `afplay` for sound effects and theme music -- zero install)
 - **Python 3.8+**
-- A terminal window at least **40 cols wide x 15 rows tall** (80x24+ recommended)
-- A terminal with Unicode + ANSI escape support (basically any modern one: Terminal.app, iTerm2, Ghostty, etc)
+- A terminal at least **40 cols x 15 rows** (80x24+ recommended)
+- A terminal with ANSI truecolor support (Terminal.app, iTerm2, Ghostty all work)
 
-## Run it
+## Run
 
 ```bash
 python3 game.py
 ```
 
+On first launch the game generates a ~15-second square-wave theme WAV in
+your temp dir and loops it during the splash screen. Press **ENTER** to
+start the game (music stops), or **Q** to chicken out.
+
 ## Controls
 
-| Key        | Action           |
-|------------|------------------|
-| `W` / `S`  | Forward / back   |
-| `A` / `D`  | Turn left / right |
-| `SPACE`    | Shoot            |
-| `Q`        | Quit             |
+| Key           | Action                |
+|---------------|-----------------------|
+| `Up` / `Down` | Forward / backward    |
+| `Left` / `Right` | Turn left / right  |
+| `Space`       | Shoot                 |
+| `Q`           | Quit                  |
 
 ## How to win
 
@@ -40,10 +95,11 @@ Kill every enemy before they touch you. That's the whole game.
 ```bash
 rm -rf em-all
 ```
+
 (It is literally in the name.)
 
 ## Status
 
-v0.1 prototype. Monochrome, one room, single gun, macOS-only audio. Next up
-(maybe): color, more enemy types, better sprites, a real gunshot `.wav`,
-and cross-platform audio.
+**v0.2** -- color rendering, arrow-key controls, animated splash screen,
+and a runtime-generated chiptune theme. Next up, maybe: more enemy types,
+better sprites, real gunshot WAVs, cross-platform audio.

@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 """RM -RF 'EM ALL -- a dumb terminal first-person shooter.
 
-A tiny Wolfenstein-3D style raycaster rendered in ASCII inside your terminal.
-Runs locally on macOS. macOS `afplay` provides sound effects using built-in
-system sounds so there are no audio dependencies to install.
+A tiny Wolfenstein-3D style raycaster rendered in color ASCII inside your
+terminal. Runs locally on macOS. macOS `afplay` provides sound effects using
+built-in system sounds, and we generate our own obnoxious 8-bit theme music
+at startup (square waves + stdlib `wave` module -- no deps).
 """
 
+import array
 import math
 import os
 import random
 import select
 import subprocess
 import sys
+import tempfile
 import termios
+import threading
 import time
 import tty
+import wave
 
+# ---- game tuning --------------------------------------------------------
 FOV = math.pi / 3.0
 MAX_DEPTH = 20.0
 MOVE_SPEED = 0.18
 TURN_SPEED = 0.09
-HIT_ANGLE = 0.15           # how wide a "bullet" is, in radians
-PLAYER_HIT_RADIUS = 0.65   # how close an enemy can get before it kills you
+HIT_ANGLE = 0.15
+PLAYER_HIT_RADIUS = 0.65
 ENEMY_SPEED = 0.025
 
 MAP = [
@@ -74,7 +80,55 @@ SOUNDS = {
     "lose":  "/System/Library/Sounds/Basso.aiff",
 }
 
+# ---- color palette (ANSI truecolor) ------------------------------------
+def _fg(r, g, b): return "\x1b[38;2;{};{};{}m".format(r, g, b)
+def _bg(r, g, b): return "\x1b[48;2;{};{};{}m".format(r, g, b)
 
+RESET  = "\x1b[0m"
+FG_DEF = "\x1b[39m"
+BG_DEF = "\x1b[49m"
+
+CEIL_BG  = _bg(18, 22, 48)
+FLOOR_BG = _bg(50, 38, 24)
+BLACK_BG = _bg(0, 0, 0)
+HUD_FG   = _fg(100, 255, 140)
+MSG_FG   = _fg(255, 230, 100)
+WIN_FG   = _fg(100, 255, 100)
+LOSE_FG  = _fg(255, 80, 80)
+CROSS_FG = _fg(255, 230, 50)
+
+ENEMY_SPRITE = [
+    "  _--_  ",
+    " /.__.\\ ",
+    " |oo..| ",
+    " \\_vv_/ ",
+    "  /||\\  ",
+    " / || \\ ",
+    "   /\\   ",
+    "  /  \\  ",
+]
+
+
+def wall_fg(dist):
+    if dist < 2.0:  return _fg(230, 205, 160)
+    if dist < 5.0:  return _fg(185, 165, 125)
+    if dist < 10.0: return _fg(125, 110, 80)
+    return _fg(75, 65, 45)
+
+
+def wall_char(dist):
+    if dist < 2.0:  return "\u2588"  # full block
+    if dist < 5.0:  return "\u2593"  # dark shade
+    if dist < 10.0: return "\u2592"  # medium shade
+    return "\u2591"                   # light shade
+
+
+def enemy_fg(dist):
+    if dist < 3.0: return _fg(255, 85, 85)
+    if dist < 7.0: return _fg(215, 65, 65)
+    return _fg(170, 50, 50)
+
+# ---- audio --------------------------------------------------------------
 def play(name):
     path = SOUNDS.get(name)
     if not path or not os.path.exists(path):
@@ -89,6 +143,88 @@ def play(name):
         pass
 
 
+def generate_theme(path):
+    """Write an obnoxious 8-bit square-wave chiptune to `path`."""
+    SR = 22050
+    NOTE_DUR = 0.16
+    VOL = 4500  # out of 32767 -- keep it quiet-ish
+
+    NOTES = {
+        "C": 261.63, "D": 293.66, "E": 329.63, "F": 349.23,
+        "G": 392.00, "A": 440.00, "B": 493.88,
+        "c": 523.25, "d": 587.33, "e": 659.25, "f": 698.46,
+        "g": 783.99, "a": 880.00,
+        "-": 0.0,
+    }
+
+    # Aggressive retro arpeggio loop. Vaguely Duke-Nukem-adjacent. Shitty.
+    SONG = (
+        "C-E-G-c-E-G-c-e-"
+        "c-G-E-C-G-E-C-C-"
+        "F-A-c-F-A-c-F-f-"
+        "c-A-F-C-G-E-C---"
+        "C-C-G-G-E-E-C-C-"
+        "D-D-A-A-F-F-D-D-"
+    )
+
+    samples = array.array("h")
+    for ch in SONG:
+        freq = NOTES.get(ch, 0.0)
+        n = int(SR * NOTE_DUR)
+        if freq <= 0:
+            samples.extend([0] * n)
+            continue
+        period_i = max(2, int(round(SR / freq)))
+        half = period_i // 2
+        one_period = [VOL] * half + [-VOL] * (period_i - half)
+        full = n // period_i
+        rem = n - full * period_i
+        samples.extend(one_period * full + one_period[:rem])
+
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(samples.tobytes())
+
+
+_music_stop = threading.Event()
+_music_proc = [None]
+
+
+def start_music(wav_path):
+    def runner():
+        while not _music_stop.is_set():
+            try:
+                p = subprocess.Popen(
+                    ["afplay", wav_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                _music_proc[0] = p
+            except (FileNotFoundError, OSError):
+                return
+            while p.poll() is None:
+                if _music_stop.is_set():
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+                    return
+                time.sleep(0.1)
+    threading.Thread(target=runner, daemon=True).start()
+
+
+def stop_music():
+    _music_stop.set()
+    p = _music_proc[0]
+    if p:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+# ---- terminal helpers ---------------------------------------------------
 def get_screen_size():
     try:
         sz = os.get_terminal_size()
@@ -99,18 +235,25 @@ def get_screen_size():
         return 80, 24
 
 
-ENEMY_SPRITE = [
-    "  _--_  ",
-    " /.__.\\ ",
-    " |oo..| ",
-    " \\_vv_/ ",
-    "  /||\\  ",
-    " / || \\ ",
-    "   /\\   ",
-    "  /  \\  ",
-]
+def get_key():
+    if not select.select([sys.stdin], [], [], 0)[0]:
+        return None
+    ch = sys.stdin.read(1)
+    if ch == "\x1b":
+        seq = ""
+        for _ in range(2):
+            if select.select([sys.stdin], [], [], 0.01)[0]:
+                seq += sys.stdin.read(1)
+            else:
+                break
+        if seq == "[A": return "UP"
+        if seq == "[B": return "DOWN"
+        if seq == "[C": return "RIGHT"
+        if seq == "[D": return "LEFT"
+        return None
+    return ch
 
-
+# ---- world / game state -------------------------------------------------
 class World:
     def __init__(self):
         self.enemies = []
@@ -220,9 +363,10 @@ class World:
                 if not self.is_wall(e["x"], ny):
                     e["y"] = ny
 
-
+# ---- render -------------------------------------------------------------
 def render(world, W, H):
-    frame = [[" "] * W for _ in range(H)]
+    empty = (" ", "", "")
+    frame = [[empty] * W for _ in range(H)]
     wall_dists = [0.0001] * W
 
     for col in range(W):
@@ -235,25 +379,18 @@ def render(world, W, H):
         wall_h = min(wall_h, H)
         top = max(0, (H - wall_h) // 2)
         bot = min(H, top + wall_h)
-
-        if dist < 2.0:
-            ch = "\u2588"  # full block
-        elif dist < 5.0:
-            ch = "\u2593"  # dark shade
-        elif dist < 10.0:
-            ch = "\u2592"  # medium shade
-        else:
-            ch = "\u2591"  # light shade
+        ch = wall_char(dist)
+        fg = wall_fg(dist)
 
         for r in range(H):
             if r < top:
-                frame[r][col] = "`" if (r * 7 + col * 3) % 11 == 0 else " "
+                frame[r][col] = (" ", "", CEIL_BG)
             elif r < bot:
-                frame[r][col] = ch
+                frame[r][col] = (ch, fg, BLACK_BG)
             else:
-                frame[r][col] = "." if (r * 5 + col * 3) % 7 == 0 else " "
+                frame[r][col] = (" ", "", FLOOR_BG)
 
-    # Billboard the enemies
+    # Billboard enemies
     visible = []
     for e in world.enemies:
         if not e["alive"]:
@@ -270,7 +407,7 @@ def render(world, W, H):
         if abs(eangle) > FOV / 2 + 0.3:
             continue
         visible.append((edist, eangle, e))
-    visible.sort(key=lambda t: -t[0])  # far to near, so near paints on top
+    visible.sort(key=lambda t: -t[0])  # far to near
 
     src_rows = len(ENEMY_SPRITE)
     src_cols = len(ENEMY_SPRITE[0])
@@ -284,6 +421,7 @@ def render(world, W, H):
         bot = min(H, top + sprite_h)
         left = col_center - sprite_w // 2
         right = col_center + sprite_w // 2
+        efg = enemy_fg(edist)
 
         for r in range(top, bot):
             for c in range(max(0, left), min(W, right)):
@@ -295,68 +433,187 @@ def render(world, W, H):
                 sx = min(sx, src_cols - 1)
                 ch = ENEMY_SPRITE[sy][sx]
                 if ch != " ":
-                    frame[r][c] = ch
+                    existing_bg = frame[r][c][2]
+                    frame[r][c] = (ch, efg, existing_bg if existing_bg else BLACK_BG)
 
     # Crosshair
-    frame[H // 2][W // 2] = "+"
+    _ch, _fg_, bg_ = frame[H // 2][W // 2]
+    frame[H // 2][W // 2] = ("+", CROSS_FG, bg_ if bg_ else BLACK_BG)
 
-    # HUD -- top row
+    # HUD top
     alive = sum(1 for e in world.enemies if e["alive"])
-    hud = " RM -RF 'EM ALL   Enemies: {}/{}   WASD move/turn  SPACE shoot  Q quit".format(
+    hud = " RM -RF 'EM ALL   Enemies: {}/{}   ARROWS move/turn   SPACE shoot   Q quit".format(
         alive, len(world.enemies)
     )
-    for i, ch in enumerate(hud[:W]):
-        frame[0][i] = ch
+    for i in range(W):
+        ch = hud[i] if i < len(hud) else " "
+        frame[0][i] = (ch, HUD_FG, BLACK_BG)
 
-    # Bottom message line
+    # Message bottom
     show_msg = time.time() < world.message_until or world.state != "playing"
     if show_msg:
         if world.state == "won":
             msg = " *** YOU WIN. {} Press Q. *** ".format(world.message)
+            mfg = WIN_FG
         elif world.state == "lost":
             msg = " *** YOU DIED. {} Press Q. *** ".format(world.message)
+            mfg = LOSE_FG
         else:
             msg = " >> {} ".format(world.message)
+            mfg = MSG_FG
         msg = msg[:W]
         start = max(0, (W - len(msg)) // 2)
-        for i, ch in enumerate(msg):
+        for i in range(W):
+            frame[H - 1][i] = (" ", "", BLACK_BG)
+        for i, c in enumerate(msg):
             if start + i < W:
-                frame[H - 1][start + i] = ch
+                frame[H - 1][start + i] = (c, mfg, BLACK_BG)
 
-    # Blit to terminal. Position each row explicitly so nothing scrolls.
+    # Blit, only emitting color changes when they actually change.
     out = ["\x1b[H"]
+    cur_fg = None
+    cur_bg = None
     for r, row in enumerate(frame):
         out.append("\x1b[{};1H".format(r + 1))
-        out.append("".join(row))
+        for c in range(W):
+            ch, fg, bg = row[c]
+            want_fg = fg if fg else FG_DEF
+            want_bg = bg if bg else BG_DEF
+            if want_fg != cur_fg:
+                out.append(want_fg)
+                cur_fg = want_fg
+            if want_bg != cur_bg:
+                out.append(want_bg)
+                cur_bg = want_bg
+            out.append(ch)
+        if cur_bg != BG_DEF:
+            out.append(BG_DEF)
+            cur_bg = BG_DEF
         out.append("\x1b[K")
+    out.append(RESET)
     sys.stdout.write("".join(out))
     sys.stdout.flush()
 
+# ---- splash screen ------------------------------------------------------
+BANNER = [
+    " ____  __  __      ____  _____ ",
+    "|  _ \\|  \\/  |    |  _ \\|  ___|",
+    "| |_) | |\\/| |    | |_) | |_  ",
+    "|  _ <| |  | |    |  _ <|  _| ",
+    "|_| \\_\\_|  |_|    |_| \\_\\_|   ",
+    "",
+    " ___ __  __       _    _     _ ",
+    "| __|  \\/  |     / \\  | |   | |",
+    "| _|| |\\/| |    / _ \\ | |   | |",
+    "|___|_|  |_|   /_/ \\_\\|___|_|_|",
+]
 
-def get_key():
-    if not select.select([sys.stdin], [], [], 0)[0]:
-        return None
-    ch = sys.stdin.read(1)
-    if ch == "\x1b":
-        # Eat the rest of an ANSI escape sequence (arrow keys, etc).
-        for _ in range(2):
-            if select.select([sys.stdin], [], [], 0.01)[0]:
-                sys.stdin.read(1)
-        return None
-    return ch
+BANNER_COLORS = [
+    _fg(255, 60, 60),
+    _fg(255, 100, 60),
+    _fg(255, 150, 60),
+    _fg(255, 200, 60),
+    _fg(255, 240, 60),
+    _fg(255, 240, 60),
+    _fg(240, 255, 60),
+    _fg(200, 255, 80),
+    _fg(150, 255, 120),
+    _fg(100, 255, 160),
+]
+
+TAGLINE = "A terminal FPS for the terminally online."
+SUBLINE = "Built in Python. Runs in your shell. Smells like a burned CPU."
+PROMPT  = "[ press ENTER to rm -rf em all   //   press Q to chicken out ]"
 
 
+def splash(W, H):
+    """Show the title screen. Returns True to start the game, False to quit."""
+    blink_on = True
+    last_blink = time.time()
+
+    while True:
+        now = time.time()
+        if now - last_blink > 0.45:
+            blink_on = not blink_on
+            last_blink = now
+
+        out = ["\x1b[H", RESET, BLACK_BG]
+        for r in range(H):
+            out.append("\x1b[{};1H".format(r + 1))
+            out.append(BLACK_BG + " " * W)
+
+        banner_top = max(1, (H - len(BANNER) - 6) // 2)
+        for i, line in enumerate(BANNER):
+            row = banner_top + i
+            if row >= H - 3:
+                break
+            col = max(0, (W - len(line)) // 2)
+            out.append("\x1b[{};{}H".format(row + 1, col + 1))
+            out.append(BANNER_COLORS[min(i, len(BANNER_COLORS) - 1)])
+            out.append(line)
+
+        tag_row = banner_top + len(BANNER) + 1
+        if tag_row < H - 2:
+            col = max(0, (W - len(TAGLINE)) // 2)
+            out.append("\x1b[{};{}H".format(tag_row + 1, col + 1))
+            out.append(_fg(220, 220, 220) + TAGLINE)
+
+        sub_row = tag_row + 1
+        if sub_row < H - 2:
+            col = max(0, (W - len(SUBLINE)) // 2)
+            out.append("\x1b[{};{}H".format(sub_row + 1, col + 1))
+            out.append(_fg(140, 140, 140) + SUBLINE)
+
+        prompt_row = sub_row + 2
+        if prompt_row >= H:
+            prompt_row = H - 1
+        col = max(0, (W - len(PROMPT)) // 2)
+        out.append("\x1b[{};{}H".format(prompt_row + 1, col + 1))
+        if blink_on:
+            out.append(_fg(255, 230, 80) + PROMPT)
+        else:
+            out.append(" " * len(PROMPT))
+
+        out.append(RESET)
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+
+        k = get_key()
+        if k == "\r" or k == "\n":
+            return True
+        if k in ("q", "Q"):
+            return False
+        time.sleep(0.05)
+
+# ---- main ---------------------------------------------------------------
 def main():
     if not sys.stdin.isatty():
         print("RM -RF 'EM ALL needs a real terminal. Run it directly.", file=sys.stderr)
         return 1
 
+    theme_path = os.path.join(tempfile.gettempdir(), "rm_rf_em_all_theme_v1.wav")
+    try:
+        if not os.path.exists(theme_path):
+            generate_theme(theme_path)
+        start_music(theme_path)
+    except Exception:
+        pass  # music is non-essential
+
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:
         tty.setcbreak(fd)
-        sys.stdout.write("\x1b[2J\x1b[?25l")  # clear screen, hide cursor
+        sys.stdout.write("\x1b[2J\x1b[?25l")
         sys.stdout.flush()
+
+        if not splash(*get_screen_size()):
+            stop_music()
+            return 0
+
+        stop_music()
+        sys.stdout.write(RESET + "\x1b[2J")
+        sys.stdout.flush()
+
         world = World()
         W, H = get_screen_size()
         last_enemy_tick = time.time()
@@ -372,19 +629,19 @@ def main():
             if k in ("q", "Q"):
                 break
             if world.state == "playing":
-                if k == "w":
+                if k == "UP":
                     world.try_move(
                         math.cos(world.player_angle) * MOVE_SPEED,
                         math.sin(world.player_angle) * MOVE_SPEED,
                     )
-                elif k == "s":
+                elif k == "DOWN":
                     world.try_move(
                         -math.cos(world.player_angle) * MOVE_SPEED,
                         -math.sin(world.player_angle) * MOVE_SPEED,
                     )
-                elif k == "a":
+                elif k == "LEFT":
                     world.player_angle -= TURN_SPEED
-                elif k == "d":
+                elif k == "RIGHT":
                     world.player_angle += TURN_SPEED
                 elif k == " ":
                     world.shoot()
@@ -396,8 +653,9 @@ def main():
 
             time.sleep(0.02)
     finally:
+        stop_music()
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        sys.stdout.write("\x1b[2J\x1b[H\x1b[?25h")
+        sys.stdout.write(RESET + "\x1b[2J\x1b[H\x1b[?25h")
         sys.stdout.flush()
     return 0
 

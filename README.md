@@ -1,8 +1,10 @@
 # RM -RF 'EM ALL
 
-A goofy first-person shooter that runs entirely in your terminal.
-Wolfenstein 3D rendered in **color ASCII**, with a blinking splash screen,
-a **runtime-generated 8-bit chiptune**, and developer humor instead of taste.
+A goofy 8-bit pixel-art side-scroller that runs entirely in your terminal.
+Half-block ANSI truecolor pixels, a blinking splash screen, a
+**runtime-generated chiptune**, and developer humor instead of taste.
+You play a nerd with glasses and a slingshot. Red ghouls shamble in.
+You pelt them.
 
 ## Screenshots
 
@@ -17,20 +19,21 @@ to start the game and mercifully end the music.)
 
 ### In-game
 
-Close-up on an enemy down the hall. Crosshair is the `+`, the enemy's
-sprite is the little pile of punctuation in the middle, and the walls get
-denser (`.` -> `+` -> `%` -> `#`) as they get closer.
+Side-view diorama: nerd on the left, two ghouls on the right, brick
+corridor with torch, crate, taunt text along the bottom.
 
-![in-game: tan walls, red enemy sprite ahead, green HUD, yellow taunt](docs/ingame.svg)
+![in-game: nerd with slingshot facing two red ghouls in a brick corridor](docs/ingame.svg)
 
-*(Walls are tan, ceiling blue-grey, floor brown, enemy red, HUD green,
-taunt yellow. The real game shades walls and enemies by distance.)*
+*(The real game renders the same scene live in your terminal using
+upper-half-block characters with truecolor fg/bg per cell, doubling the
+vertical pixel resolution.)*
 
 ## What it is
 
-A minimal raycaster in pure-stdlib Python. One room, a few enemies that
-shuffle toward you, one gun with infinite ammo, color rendering via ANSI
-truecolor, and a pile of dumb taunts. Crude on purpose.
+A pure-stdlib Python pixel-art side-scroller. One screen, ghouls walk in
+from the right, you shoot a slingshot pellet straight at them. Color
+rendering via ANSI truecolor + `▀` half-block characters, plus a pile of
+dumb taunts. Crude on purpose.
 
 ## Requirements
 
@@ -54,9 +57,8 @@ dir and loops it during the splash. Press **ENTER** to start the game
 
 | Key           | Action                |
 |---------------|-----------------------|
-| `Up` / `Down` | Forward / backward    |
-| `Left` / `Right` | Turn left / right  |
-| `Space`       | Shoot                 |
+| `Left` / `Right` | Walk left / right  |
+| `Space`       | Shoot slingshot       |
 | `Q`           | Quit                  |
 
 ## How to win
@@ -73,11 +75,17 @@ rm -rf em-all
 
 ## Status
 
-**v0.3** -- DDA raycaster (render is ~40x faster, ~0.8ms per frame at
-80x24), arrow keys drained per frame so inputs stop queueing up, and the
-theme got a lobotomy: dropped an octave to E2, switched to palm-muted
-sixteenth-note gallops with tritone stabs and power-chord fifths for
-something that at least *rhymes* with death metal.
+**v0.4** -- pivoted from raycaster-FPS to **8-bit pixel-art
+side-scroller**. Renders to a half-block-pixel framebuffer with truecolor
+fg/bg per cell (effectively 2x vertical resolution per terminal row).
+New protagonist: a nerd with glasses and a slingshot. Enemies are red
+ghouls that shamble in from the right.
+
+**v0.3** -- DDA raycaster (render was ~0.8ms per frame at 80x24), arrow
+keys drained per frame so inputs stop queueing up, and the theme got a
+lobotomy: dropped an octave to E2, switched to palm-muted sixteenth-note
+gallops with tritone stabs and power-chord fifths for something that at
+least *rhymes* with death metal.
 
 **v0.2** -- color rendering, arrow-key controls, animated splash screen,
 and a runtime-generated chiptune theme.

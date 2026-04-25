@@ -58,6 +58,7 @@ dir and loops it during the splash. Press **ENTER** to start the game
 | Key           | Action                |
 |---------------|-----------------------|
 | `Left` / `Right` | Walk left / right  |
+| `Up`          | Jump                  |
 | `Space`       | Shoot slingshot       |
 | `Q`           | Quit                  |
 
@@ -79,7 +80,9 @@ rm -rf em-all
 side-scroller**. Renders to a half-block-pixel framebuffer with truecolor
 fg/bg per cell (effectively 2x vertical resolution per terminal row).
 New protagonist: a nerd with glasses and a slingshot. Enemies are red
-ghouls that shamble in from the right.
+ghouls that shamble in from the right. Splash screen is now also pixel
+art (fire-gradient title, skull at larger sizes, CRT scanlines), and
+the nerd can **jump** (Up arrow) to clear ghouls.
 
 **v0.3** -- DDA raycaster (render was ~0.8ms per frame at 80x24), arrow
 keys drained per frame so inputs stop queueing up, and the theme got a

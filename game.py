@@ -31,6 +31,8 @@ PLAYER_MAX_FRACTION = 0.45     # player can walk left half-ish of screen
 PLAYER_SPEED       = 1.4       # px / tick
 PELLET_SPEED       = 3.4       # px / tick (straight shot, no gravity)
 PELLET_COOLDOWN    = 0.18      # seconds between shots
+JUMP_V0            = 1.7       # initial upward velocity (px / tick)
+GRAVITY            = 0.10      # downward accel (px / tick^2)
 ENEMY_SPEED_MIN    = 0.30
 ENEMY_SPEED_MAX    = 0.65
 ENEMY_SPAWN_MIN    = 0.9
@@ -354,6 +356,25 @@ class Framebuffer:
                         self.set(cx + rx, y0 + ry, color)
             cx += 5 + spacing
 
+    def blit_text_scaled(self, text, x0, y0, scale, color, spacing=1, row_colors=None):
+        """Render uppercase text scaled. row_colors (list of 7) overrides color
+        per glyph row (for fire/rainbow gradients). spacing is pre-scale."""
+        cx = x0
+        for ch in text.upper():
+            glyph = FONT.get(ch, FONT[" "])
+            for ry, row in enumerate(glyph):
+                rc = row_colors[ry] if row_colors else color
+                for rx, c in enumerate(row):
+                    if c == "#":
+                        self.fill_rect(cx + rx * scale, y0 + ry * scale,
+                                       scale, scale, rc)
+            cx += (5 + spacing) * scale
+
+    @staticmethod
+    def text_width(text, scale=1, spacing=1):
+        n = len(text)
+        return n * 5 * scale + max(0, n - 1) * spacing * scale
+
     def render(self):
         """Return the ANSI string that draws the framebuffer."""
         out = [HOME]
@@ -488,10 +509,11 @@ class World:
     def __init__(self, w, h):
         self.w = w
         self.h = h
-        # static-set in update_layout when bg drawn
         self.ground_y = int(h * 0.78)
         self.player_x = PLAYER_MIN_X + 4
         self.player_y = self.ground_y - len(NERD)
+        self.player_vy = 0.0
+        self.player_grounded = True
         self.player_face_right = True
         self.pellets = []
         self.enemies = []
@@ -501,7 +523,7 @@ class World:
         self.next_spawn = time.time() + random.uniform(ENEMY_SPAWN_MIN, ENEMY_SPAWN_MAX)
         self.last_shot = 0.0
         self.last_hit = 0.0
-        self.state = "playing"  # "win" / "lose"
+        self.state = "playing"
         self.message = random.choice(KILL_TAUNTS)
         self.message_until = 0.0
         self.end_message = ""
@@ -509,14 +531,15 @@ class World:
     def player_max_x(self):
         return int(self.w * PLAYER_MAX_FRACTION)
 
-    def feet_y(self):
-        return self.ground_y
+    def grounded_y(self):
+        return self.ground_y - len(NERD)
 
     def update_layout(self, w, h, ground_y):
         self.w, self.h, self.ground_y = w, h, ground_y
-        # clamp player
         self.player_x = max(PLAYER_MIN_X, min(self.player_x, self.player_max_x()))
-        self.player_y = self.ground_y - len(NERD)
+        # only re-anchor to floor if not mid-jump
+        if self.player_grounded:
+            self.player_y = self.grounded_y()
 
     def shoot(self):
         now = time.time()
@@ -542,8 +565,21 @@ class World:
             elif k == "RIGHT":
                 self.player_x = min(self.player_max_x(), self.player_x + PLAYER_SPEED)
                 self.player_face_right = True
+            elif k == "UP":
+                if self.player_grounded:
+                    self.player_vy = -JUMP_V0
+                    self.player_grounded = False
             elif k == " ":
                 self.shoot()
+
+        # jump physics
+        if not self.player_grounded:
+            self.player_vy += GRAVITY
+            self.player_y += self.player_vy
+            if self.player_y >= self.grounded_y():
+                self.player_y = self.grounded_y()
+                self.player_vy = 0.0
+                self.player_grounded = True
 
         # spawn enemies
         now = time.time()
@@ -585,12 +621,16 @@ class World:
                     self.message_until = time.time() + 1.4
                     play("kill")
                     break
-            # touch player
+            # touch player (full bbox so jumping clears them)
             if e.alive:
-                # enemy bbox (12 wide) vs player bbox (nerd is ~12 wide centered)
-                pleft = self.player_x + 2
-                pright = self.player_x + 12
-                if e.x < pright and e.x + 12 > pleft:
+                pleft   = self.player_x + 2
+                pright  = self.player_x + 12
+                ptop    = self.player_y + 4    # head/torso, not whole sprite
+                pbot    = self.player_y + len(NERD)
+                etop    = e.y + 1
+                ebot    = e.y + len(ENEMY_A)
+                if (e.x < pright and e.x + 12 > pleft
+                        and etop < pbot and ebot > ptop):
                     if time.time() - self.last_hit > HIT_COOLDOWN:
                         self.lives -= 1
                         self.last_hit = time.time()
@@ -664,7 +704,7 @@ def render_world(fb, world):
     hud_h = 9
     fb.fill_rect(0, 0, fb.w, hud_h, (10, 16, 12))
     if fb.w >= 110:
-        stat = f"KILLS {world.kills}/{TOTAL_ENEMIES}    LIVES {world.lives}"
+        stat = f"KILLS {world.kills}/{TOTAL_ENEMIES}  LIVES {world.lives}"
     else:
         stat = f"K {world.kills}/{TOTAL_ENEMIES}  HP {world.lives}"
     stat_w = len(stat) * 6 - 1
@@ -884,83 +924,164 @@ def get_keys():
 
 
 # ===================================================================
-# Splash screen (text-based, kept simple)
+# Splash screen (pixel-art via framebuffer)
 # ===================================================================
-BANNER = [
-    " ____  __  __      ____  _____ ",
-    "|  _ \\|  \\/  |    |  _ \\|  ___|",
-    "| |_) | |\\/| |    | |_) | |_  ",
-    "|  _ <| |  | |    |  _ <|  _| ",
-    "|_| \\_\\_|  |_|    |_| \\_\\_|   ",
-    "",
-    " ___ __  __       _    _     _ ",
-    "| __|  \\/  |     / \\  | |   | |",
-    "| _|| |\\/| |    / _ \\ | |   | |",
-    "|___|_|  |_|   /_/ \\_\\|___|_|_|",
+
+# 14x10 pixel skull (used as splash icon).  Reuses palette: r=red dark,
+# d=red mid, D=red light, V=yellow eye, m=mouth interior, F=glasses frame.
+SKULL = [
+    "....DDDDDD....",
+    "..DddddddddD..",
+    ".DddddddddddD.",
+    ".dEEdddddEEdd.",
+    ".dEEdddddEEdd.",
+    ".ddmmdmmddddd.",
+    ".dDDDmmmmDDDd.",
+    "..DddmmmmddD..",
+    "...DDDDDDDD...",
+    "....DDDDDD....",
 ]
-BANNER_COLORS = [
-    fg_ansi(255, 60, 60),
-    fg_ansi(255, 100, 60),
-    fg_ansi(255, 150, 60),
-    fg_ansi(255, 200, 60),
-    fg_ansi(255, 240, 60),
-    fg_ansi(255, 240, 60),
-    fg_ansi(240, 255, 60),
-    fg_ansi(200, 255, 80),
-    fg_ansi(150, 255, 120),
-    fg_ansi(100, 255, 160),
+
+# 7-row fire gradients (red->yellow and yellow->green) for the title halves.
+FIRE_TOP = [
+    (255,  60,  60),
+    (255, 100,  60),
+    (255, 150,  60),
+    (255, 200,  60),
+    (255, 240,  80),
+    (255, 240, 100),
+    (240, 255, 100),
 ]
-TAGLINE = "A terminal pixel-art slingshot for the terminally online."
-SUBLINE = "Built in Python. Runs in your shell. Smells like a burned CPU."
-PROMPT  = "[ press ENTER to rm -rf em all   //   press Q to chicken out ]"
+FIRE_BOT = [
+    (240, 255, 100),
+    (200, 255, 100),
+    (170, 255, 130),
+    (140, 255, 160),
+    (110, 255, 180),
+    ( 90, 255, 200),
+    ( 80, 255, 220),
+]
 
 
-def splash(W, H):
+def render_splash(fb, blink_on):
+    """Draw the 8-bit splash into the framebuffer."""
+    # background gradient (deep navy at top, slightly lighter at bottom)
+    for y in range(fb.h):
+        t = y / max(1, fb.h - 1)
+        c = lerp_rgb((10, 12, 22), (24, 26, 50), t)
+        for x in range(fb.w):
+            fb.set(x, y, c)
+
+    # sparse stars
+    rng = random.Random(7)
+    for _ in range(max(10, fb.w // 6)):
+        sx = rng.randrange(fb.w)
+        sy = rng.randrange(fb.h)
+        # avoid the title band so we don't flicker stars inside letters
+        fb.set(sx, sy, (190, 190, 220))
+
+    # ---- Title ----
+    # If room, render at scale 2; otherwise scale 1.
+    scale = 2 if fb.w >= 100 else 1
+
+    line1, line2 = "RM -RF", "EM ALL"
+    w1 = Framebuffer.text_width(line1, scale=scale, spacing=1)
+    w2 = Framebuffer.text_width(line2, scale=scale, spacing=1)
+
+    # pick tagline that fits
+    for cand in ("PIXEL SLINGSHOT ARCADE", "NERD WITH A SLINGSHOT",
+                 "8-BIT NERD MODE", "NERD MODE", ""):
+        tw = Framebuffer.text_width(cand, scale=1, spacing=1) if cand else 0
+        if cand == "" or tw <= fb.w - 4:
+            tag = cand
+            break
+
+    # pick prompt that fits
+    for cand in ("PRESS ENTER  -  Q TO QUIT", "ENTER OR Q"):
+        pw = Framebuffer.text_width(cand, scale=1, spacing=1)
+        if pw <= fb.w - 4:
+            prompt = cand
+            break
+    else:
+        prompt, pw = "ENTER OR Q", Framebuffer.text_width("ENTER OR Q", 1, 1)
+
+    # vertical layout pieces
+    line_h = 7 * scale
+    tag_h = 7 if tag else 0
+    prompt_h = 7
+    gap = 3 if scale == 2 else 2
+
+    # skull only if scale 2 AND there's vertical room for it
+    base_h = line_h + gap + line_h + gap + tag_h + (gap if tag else 0) + prompt_h
+    show_skull = scale == 2 and fb.h - base_h >= 10 + gap + 2
+    skull_h = 10 if show_skull else 0
+
+    total_h = (skull_h + gap if skull_h else 0) + base_h
+    top = max(1, (fb.h - total_h) // 2)
+
+    y = top
+    if show_skull:
+        sx = (fb.w - 14) // 2
+        fb.blit_sprite(SKULL, sx, y)
+        y += skull_h + gap
+
+    # title line 1 with fire-top gradient
+    fb.blit_text_scaled(line1, (fb.w - w1) // 2, y, scale, None,
+                        spacing=1, row_colors=FIRE_TOP)
+    y += line_h + gap
+
+    # title line 2 with fire-bottom gradient
+    fb.blit_text_scaled(line2, (fb.w - w2) // 2, y, scale, None,
+                        spacing=1, row_colors=FIRE_BOT)
+    y += line_h + gap
+
+    # tagline (single short line) — may be empty if nothing fits
+    if tag:
+        tw = Framebuffer.text_width(tag, scale=1, spacing=1)
+        fb.blit_text(tag, max(2, (fb.w - tw) // 2), y, (220, 220, 230))
+        y += tag_h + gap
+
+    # blinking prompt
+    if blink_on:
+        fb.blit_text(prompt, max(2, (fb.w - pw) // 2), y, (255, 230, 80))
+
+    # CRT scanlines: dim every other row
+    for sy in range(1, fb.h, 2):
+        for x in range(fb.w):
+            r, g, b = fb.px[sy * fb.w + x]
+            fb.px[sy * fb.w + x] = (r * 4 // 5, g * 4 // 5, b * 4 // 5)
+
+    # bezel border (1 pixel)
+    border = (60, 60, 100)
+    for x in range(fb.w):
+        fb.set(x, 0, border)
+        fb.set(x, fb.h - 1, border)
+    for yy in range(fb.h):
+        fb.set(0, yy, border)
+        fb.set(fb.w - 1, yy, border)
+
+
+def splash(cols, rows):
+    """Run the pixel-art splash loop. Returns True for ENTER, False for Q."""
+    fb_w, fb_h = cols, rows * 2
+    fb = Framebuffer(fb_w, fb_h)
     blink_on = True
     last_blink = time.time()
-    BLACK = bg_ansi(0, 0, 0)
     while True:
         now = time.time()
         if now - last_blink > 0.45:
             blink_on = not blink_on
             last_blink = now
 
-        out = [HOME, RESET, BLACK]
-        for r in range(H):
-            out.append(f"\x1b[{r + 1};1H")
-            out.append(BLACK + " " * W)
+        # re-create fb if terminal resized
+        ncols, nrows = get_screen_size()
+        if (ncols, nrows) != (cols, rows):
+            cols, rows = ncols, nrows
+            fb = Framebuffer(cols, rows * 2)
+            sys.stdout.write(CLEAR)
 
-        banner_top = max(1, (H - len(BANNER) - 6) // 2)
-        for i, line in enumerate(BANNER):
-            row = banner_top + i
-            if row >= H - 3:
-                break
-            col = max(0, (W - len(line)) // 2)
-            out.append(f"\x1b[{row + 1};{col + 1}H")
-            out.append(BANNER_COLORS[min(i, len(BANNER_COLORS) - 1)])
-            out.append(line)
-
-        tag_row = banner_top + len(BANNER) + 1
-        if tag_row < H - 2:
-            col = max(0, (W - len(TAGLINE)) // 2)
-            out.append(f"\x1b[{tag_row + 1};{col + 1}H")
-            out.append(fg_ansi(220, 220, 220) + TAGLINE)
-        sub_row = tag_row + 1
-        if sub_row < H - 2:
-            col = max(0, (W - len(SUBLINE)) // 2)
-            out.append(f"\x1b[{sub_row + 1};{col + 1}H")
-            out.append(fg_ansi(140, 140, 140) + SUBLINE)
-        prompt_row = sub_row + 2
-        if prompt_row >= H:
-            prompt_row = H - 1
-        col = max(0, (W - len(PROMPT)) // 2)
-        out.append(f"\x1b[{prompt_row + 1};{col + 1}H")
-        if blink_on:
-            out.append(fg_ansi(255, 230, 80) + PROMPT)
-        else:
-            out.append(" " * len(PROMPT))
-        out.append(RESET)
-        sys.stdout.write("".join(out))
+        render_splash(fb, blink_on)
+        sys.stdout.write(fb.render())
         sys.stdout.flush()
 
         for k in get_keys():
@@ -968,7 +1089,7 @@ def splash(W, H):
                 return True
             if k in ("q", "Q"):
                 return False
-        time.sleep(0.05)
+        time.sleep(0.06)
 
 
 # ===================================================================

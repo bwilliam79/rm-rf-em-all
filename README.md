@@ -13,18 +13,22 @@ You pelt them.
 (With an obnoxious square-wave theme song playing on a loop. Press ENTER
 to start the game and mercifully end the music.)
 
-![splash screen: RM -RF 'EM ALL banner fading red -> yellow -> green](docs/splash.svg)
+![splash screen: RM -RF 'EM ALL banner with red->green fire-gradient title, skull, starfield, CRT scanlines](docs/splash.png)
 
-*(In your real terminal the bottom prompt also blinks; this is a static snapshot.)*
+*(Rendered straight from the in-game framebuffer, then upscaled 4x with
+nearest-neighbor so the pixels stay sharp. In your real terminal the
+prompt also blinks; this is a static snapshot.)*
 
 ### In-game
 
-Side-view diorama: nerd on the left, two ghouls on the right, brick
-corridor with torch, crate, taunt text along the bottom.
+Side-view diorama: nerd in a lab coat on the left, two red ghouls on
+the right, brick corridor with a torch and a crate, slingshot pellet
+mid-flight.
 
-![in-game: nerd with slingshot facing two red ghouls in a brick corridor](docs/ingame.svg)
+![in-game: lab-coat nerd with slingshot facing two red ghouls in a brick corridor](docs/ingame.png)
 
-*(The real game renders the same scene live in your terminal using
+*(Same source: real framebuffer output, 4x nearest-neighbor upscale.
+The actual game renders this scene live in your terminal using
 upper-half-block characters with truecolor fg/bg per cell, doubling the
 vertical pixel resolution.)*
 
@@ -79,10 +83,13 @@ rm -rf em-all
 **v0.4** -- pivoted from raycaster-FPS to **8-bit pixel-art
 side-scroller**. Renders to a half-block-pixel framebuffer with truecolor
 fg/bg per cell (effectively 2x vertical resolution per terminal row).
-New protagonist: a nerd with glasses and a slingshot. Enemies are red
-ghouls that shamble in from the right. Splash screen is now also pixel
-art (fire-gradient title, skull at larger sizes, CRT scanlines), and
-the nerd can **jump** (Up arrow) to clear ghouls.
+New protagonist: a nerd in a **lab coat** with glasses and a slingshot.
+Enemies are red ghouls that shamble in from the right. Splash screen is
+also pixel art (fire-gradient title, skull at larger sizes, CRT
+scanlines). The nerd can **jump** (Up arrow) to clear ghouls. Movement
+also got smoother: each LEFT/RIGHT press now extends a brief "still
+held" window so walking is continuous through the OS auto-repeat
+pre-delay instead of stuttering.
 
 **v0.3** -- DDA raycaster (render was ~0.8ms per frame at 80x24), arrow
 keys drained per frame so inputs stop queueing up, and the theme got a

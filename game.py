@@ -28,7 +28,10 @@ TARGET_FPS         = 30
 FRAME_DT           = 1.0 / TARGET_FPS
 PLAYER_MIN_X       = 6
 PLAYER_MAX_FRACTION = 0.45     # player can walk left half-ish of screen
-PLAYER_SPEED       = 1.4       # px / tick
+PLAYER_SPEED       = 1.4       # px / tick (per discrete key event)
+PLAYER_PX_PER_SEC  = 42.0      # continuous walk speed while a direction is held
+MOVE_HOLD_S        = 0.30      # how long a key-press counts as "still held" so we
+                               # bridge the OS pre-repeat delay (~250-500ms on macOS)
 PELLET_SPEED       = 3.4       # px / tick (straight shot, no gravity)
 PELLET_COOLDOWN    = 0.18      # seconds between shots
 JUMP_V0            = 1.7       # initial upward velocity (px / tick)
@@ -124,8 +127,10 @@ PAL = {
     'L': (180, 230, 255),        # glasses lens
     'E': (20, 20, 24),           # pupil
     'M': (160, 70, 70),          # mouth
-    'P': (110, 90, 220),         # shirt purple (nerd)
-    'p': (78, 60, 170),          # shirt shadow
+    'P': (238, 240, 246),        # lab coat white
+    'p': (188, 192, 205),        # lab coat shadow / fold
+    'N': ( 50,  50,  82),        # collar V + button placket (dark navy)
+    'n': (110,  90, 200),        # bit of purple shirt under the V
     'T': (60, 60, 88),           # pants
     't': (40, 40, 64),           # pants shadow
     'b': (16, 16, 24),           # boots
@@ -171,12 +176,12 @@ NERD = [
     "..HsssssssH.......",
     "...sssMMss........",
     "....sssss.........",
-    "...PPPPPPP........",
-    "..PPpPPPPPp..W.W..",
-    "..pPPPPPPPpsWRRRW.",
+    "...PPPnPPP........",   # closed neck, tiny purple shirt peek
+    "..PPpNnnnNp..W.W..",   # V-collar opens: lapels (N) frame undershirt (n)
+    "..pPPPNPPPpsWRRRW.",   # V tip
     "..PPPPPPPPPsWWoWW.",
     "..PPPPPPPPPs.WRW..",
-    "..pPPPPPPPp..WWW..",
+    "..pPPPNPPPp..WWW..",   # button
     "...PPPPPP....WW...",
     "...TTTTT.....WW...",
     "..tTTTTt..........",
@@ -515,6 +520,10 @@ class World:
         self.player_vy = 0.0
         self.player_grounded = True
         self.player_face_right = True
+        # held-key bridge: extend the effect of each LEFT/RIGHT key event for
+        # MOVE_HOLD_S so we keep walking through the OS auto-repeat pre-delay.
+        self.hold_left_until = 0.0
+        self.hold_right_until = 0.0
         self.pellets = []
         self.enemies = []
         self.kills = 0
@@ -557,13 +566,15 @@ class World:
         if self.state != "playing":
             return
 
-        # input
+        # input. LEFT/RIGHT also extend a "hold window" so movement is
+        # continuous while held, even during the OS auto-repeat pre-delay.
+        now_t = time.time()
         for k in keys:
             if k == "LEFT":
-                self.player_x = max(PLAYER_MIN_X, self.player_x - PLAYER_SPEED)
+                self.hold_left_until = now_t + MOVE_HOLD_S
                 self.player_face_right = False
             elif k == "RIGHT":
-                self.player_x = min(self.player_max_x(), self.player_x + PLAYER_SPEED)
+                self.hold_right_until = now_t + MOVE_HOLD_S
                 self.player_face_right = True
             elif k == "UP":
                 if self.player_grounded:
@@ -571,6 +582,13 @@ class World:
                     self.player_grounded = False
             elif k == " ":
                 self.shoot()
+
+        # apply continuous walk based on hold state
+        step = PLAYER_PX_PER_SEC * dt
+        if now_t < self.hold_left_until:
+            self.player_x = max(PLAYER_MIN_X, self.player_x - step)
+        if now_t < self.hold_right_until:
+            self.player_x = min(self.player_max_x(), self.player_x + step)
 
         # jump physics
         if not self.player_grounded:

@@ -21,11 +21,11 @@ prompt also blinks; this is a static snapshot.)*
 
 ### In-game
 
-Side-view diorama: nerd in a lab coat on the left, two red ghouls on
-the right, brick corridor with a torch and a crate, slingshot pellet
-mid-flight.
+Side-scrolling pixel diorama: lab-coat nerd mid-jump between two crate
+stacks, torchlit brick corridor, slingshot pellet in flight. The world
+is several screens wide and the camera follows the player.
 
-![in-game: lab-coat nerd with slingshot facing two red ghouls in a brick corridor](docs/ingame.png)
+![in-game: lab-coat nerd jumping between crate stacks in a torchlit brick corridor](docs/ingame.png)
 
 *(Same source: real framebuffer output, 4x nearest-neighbor upscale.
 The actual game renders this scene live in your terminal using
@@ -34,10 +34,12 @@ vertical pixel resolution.)*
 
 ## What it is
 
-A pure-stdlib Python pixel-art side-scroller. One screen, ghouls walk in
-from the right, you shoot a slingshot pellet straight at them. Color
-rendering via ANSI truecolor + `▀` half-block characters, plus a pile of
-dumb taunts. Crude on purpose.
+A pure-stdlib Python pixel-art side-scroller. The world is a few
+screens wide, the camera follows you, and there are crate stacks
+scattered along the way to jump on or over. Ghouls shamble in from
+the right; you pelt them with a slingshot. Color rendering via ANSI
+truecolor + `▀` half-block characters, plus a pile of dumb taunts.
+Crude on purpose.
 
 ## Requirements
 
@@ -89,7 +91,9 @@ also pixel art (fire-gradient title, skull at larger sizes, CRT
 scanlines). The nerd can **jump** (Up arrow) to clear ghouls. Movement
 also got smoother: each LEFT/RIGHT press now extends a brief "still
 held" window so walking is continuous through the OS auto-repeat
-pre-delay instead of stuttering.
+pre-delay instead of stuttering. The world is now several screens wide
+with a scrolling camera and randomly-placed **crate stacks** to jump
+on or over -- tall stacks make handy elevated firing positions.
 
 **v0.3** -- DDA raycaster (render was ~0.8ms per frame at 80x24), arrow
 keys drained per frame so inputs stop queueing up, and the theme got a

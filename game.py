@@ -27,15 +27,19 @@ import wave
 TARGET_FPS         = 30
 FRAME_DT           = 1.0 / TARGET_FPS
 PLAYER_MIN_X       = 6
-PLAYER_MAX_FRACTION = 0.45     # player can walk left half-ish of screen
 PLAYER_SPEED       = 1.4       # px / tick (per discrete key event)
 PLAYER_PX_PER_SEC  = 42.0      # continuous walk speed while a direction is held
 MOVE_HOLD_S        = 0.30      # how long a key-press counts as "still held" so we
                                # bridge the OS pre-repeat delay (~250-500ms on macOS)
+WORLD_SCREENS      = 3         # total world width in screen-widths
+CAMERA_DEAD_LO     = 0.35      # camera scrolls left if player < this fraction of fb_w
+CAMERA_DEAD_HI     = 0.55      # camera scrolls right if player > this fraction of fb_w
 PELLET_SPEED       = 3.4       # px / tick (straight shot, no gravity)
 PELLET_COOLDOWN    = 0.18      # seconds between shots
-JUMP_V0            = 1.7       # initial upward velocity (px / tick)
-GRAVITY            = 0.10      # downward accel (px / tick^2)
+JUMP_V0            = 2.1       # initial upward velocity (px / tick)
+GRAVITY            = 0.11      # downward accel (px / tick^2)
+                               # max jump height = JUMP_V0^2 / (2*GRAVITY) ~= 20 px
+                               # so a 2-stack crate (18 px) is just clearable.
 ENEMY_SPEED_MIN    = 0.30
 ENEMY_SPEED_MAX    = 0.65
 ENEMY_SPAWN_MIN    = 0.9
@@ -409,72 +413,84 @@ class Framebuffer:
 # ===================================================================
 # Background (computed once per resolution)
 # ===================================================================
-def draw_background(fb):
-    """Sky -> mountains -> back wall -> ground floor with some texture."""
+def draw_background(fb, camera_x=0.0):
+    """Sky -> back wall -> ground. Wall + ground textures scroll with the
+    camera; sky and stars stay fixed (parallax at infinity)."""
     w, h = fb.w, fb.h
+    cx = int(camera_x)
 
     # ground horizon line: ground takes bottom 22% of pixels
     ground_y = int(h * 0.78)
     wall_top = int(h * 0.18)
     wall_bot = ground_y - 1
 
-    # Sky gradient: 3 bands top to bottom
+    # Sky gradient: 3 bands top to bottom (no scroll)
     for y in range(0, wall_top):
         t = y / max(1, wall_top - 1)
-        # interpolate from k -> K -> B
         if t < 0.5:
-            tt = t * 2
-            c = lerp_rgb(PAL['k'], PAL['K'], tt)
+            c = lerp_rgb(PAL['k'], PAL['K'], t * 2)
         else:
-            tt = (t - 0.5) * 2
-            c = lerp_rgb(PAL['K'], PAL['B'], tt)
+            c = lerp_rgb(PAL['K'], PAL['B'], (t - 0.5) * 2)
         for x in range(w):
             fb.set(x, y, c)
 
-    # Stars
+    # Stars (fixed in screen space — they're "at infinity")
     rng = random.Random(42)
     for _ in range(max(8, w // 8)):
         sx = rng.randrange(w)
         sy = rng.randrange(0, max(1, wall_top - 2))
         fb.set(sx, sy, PAL['*'])
 
-    # Back wall (brick)
+    # Back wall fill
     fb.fill_rect(0, wall_top, w, wall_bot - wall_top + 1, PAL['j'])
-    # brick courses every 4 px, alternating offsets
+
+    # Horizontal mortar courses every 4 px (full width — same regardless of cx)
     for r in range(wall_top, wall_bot + 1, 4):
-        # mortar horizontal line
         for x in range(w):
             fb.set(x, r, PAL['u'])
-        offset = 0 if ((r - wall_top) // 4) % 2 == 0 else 5
-        for x in range(-offset, w, 10):
+
+    # Vertical mortar boundaries — scroll with camera, alternate offset per
+    # course so bricks look staggered.
+    for r in range(wall_top, wall_bot + 1, 4):
+        course_idx = (r - wall_top) // 4
+        course_offset = 5 if (course_idx % 2) else 0
+        # World-x boundaries are at multiples of 10 + course_offset.
+        # Pick the smallest screen_x in [-10, 0) that maps to one.
+        first = (course_offset - cx) % 10
+        if first > 0:
+            first -= 10
+        for sx in range(first, w, 10):
             for dy in range(0, 4):
-                if r + dy <= wall_bot:
-                    fb.set(x % w, r + dy, PAL['u'])
-    # subtle wall highlight band
+                yy = r + dy
+                if yy <= wall_bot:
+                    fb.set(sx, yy, PAL['u'])
+
+    # Wall highlight band
     for x in range(w):
         fb.set(x, wall_top, PAL['J'])
 
     # Wall-floor seam shadow
     fb.fill_rect(0, ground_y - 1, w, 1, (20, 12, 6))
 
-    # Ground (3 bands: lit -> mid -> deep)
+    # Ground bands (3 colors top→bottom)
     for y in range(ground_y, h):
         t = (y - ground_y) / max(1, h - ground_y - 1)
-        if t < 0.25:
-            c = PAL['g']
-        elif t < 0.6:
-            c = PAL['G']
-        else:
-            c = PAL['h']
+        if t < 0.25:   c = PAL['g']
+        elif t < 0.6:  c = PAL['G']
+        else:          c = PAL['h']
         for x in range(w):
             fb.set(x, y, c)
-    # tile seams
-    for x in range(0, w, 12):
-        for y in range(ground_y, ground_y + 2):
-            fb.set(x, y, PAL['h'])
-    # grain highlights every other pixel on the top ground row
-    for x in range(0, w, 3):
-        fb.set(x, ground_y, PAL['q'])
+
+    # Tile seams every 12 px in world coords (scroll with camera)
+    seam0 = -(cx % 12)
+    for sx in range(seam0, w, 12):
+        for yy in range(ground_y, ground_y + 2):
+            fb.set(sx, yy, PAL['h'])
+
+    # Grain highlights every 3 px in world coords
+    grain0 = -(cx % 3)
+    for sx in range(grain0, w, 3):
+        fb.set(sx, ground_y, PAL['q'])
 
     return ground_y, wall_top, wall_bot
 
@@ -511,9 +527,18 @@ class Enemy:
 
 
 class World:
+    # NERD sprite is 18x20 but the visible body is roughly cols 2-14, rows 4-19.
+    # Use a tighter bbox for collisions so hair etc. doesn't trigger them.
+    PB_X, PB_Y, PB_W, PB_H = 2, 4, 12, 16
+
     def __init__(self, w, h):
-        self.w = w
+        # fb_w/fb_h = current visible framebuffer dims. world_w = total level width.
+        self.fb_w = w
+        self.fb_h = h
+        self.w = w           # alias kept for legacy callers
         self.h = h
+        self.world_w = max(w * WORLD_SCREENS, w + 200)
+        self.camera_x = 0.0
         self.ground_y = int(h * 0.78)
         self.player_x = PLAYER_MIN_X + 4
         self.player_y = self.ground_y - len(NERD)
@@ -526,6 +551,8 @@ class World:
         self.hold_right_until = 0.0
         self.pellets = []
         self.enemies = []
+        # obstacles (crate stacks) in world coords: list of (x, y, w, h)
+        self.obstacles = []
         self.kills = 0
         self.lives = PLAYER_LIVES
         self.spawned = 0
@@ -536,19 +563,80 @@ class World:
         self.message = random.choice(KILL_TAUNTS)
         self.message_until = 0.0
         self.end_message = ""
+        self._gen_level()
+
+    def _gen_level(self):
+        """Place crate stacks and wall torches across the world.
+        Deterministic per (world_w, ground_y)."""
+        self.obstacles = []
+        self.torches = []
+        rng = random.Random(0xC0FFEE ^ self.world_w ^ self.ground_y)
+        crate_w, crate_h = len(CRATE[0]), len(CRATE)  # 10 x 9
+        # Crate stacks. Start past the initial visible area so the player has
+        # elbow room for the first move.
+        x = self.fb_w + rng.randint(20, 50)
+        while x < self.world_w - 30:
+            # Mostly single crates, occasional 2-stack. No 3-stacks: max jump
+            # only just clears a 2-stack, so a 3 would be a hard wall.
+            stack = rng.choice([1, 1, 1, 1, 2, 2])
+            ow = crate_w
+            oh = stack * crate_h
+            self.obstacles.append((x, self.ground_y - oh, ow, oh))
+            x += rng.randint(36, 84)
+        # Torches every ~70-110 px on the back wall.
+        tx = 30
+        while tx < self.world_w - 10:
+            self.torches.append(tx)
+            tx += rng.randint(60, 110)
 
     def player_max_x(self):
-        return int(self.w * PLAYER_MAX_FRACTION)
+        # Player can walk to the right edge of the WORLD, not the screen.
+        return self.world_w - 18  # 18 = NERD sprite width
 
     def grounded_y(self):
-        return self.ground_y - len(NERD)
+        # y position of player_y when standing on the floor at the current x.
+        return self._floor_top_at(self.player_x) - len(NERD)
+
+    def _player_bbox(self, x=None, y=None):
+        if x is None: x = self.player_x
+        if y is None: y = self.player_y
+        return (x + self.PB_X, y + self.PB_Y, self.PB_W, self.PB_H)
+
+    def _aabb_overlap(self, ax, ay, aw, ah, bx, by, bw, bh):
+        return ax < bx + bw and ax + aw > bx and ay < by + bh and ay + ah > by
+
+    def _hits_any_obstacle(self, x, y):
+        ax, ay, aw, ah = self._player_bbox(x, y)
+        for ox, oy, ow, oh in self.obstacles:
+            if self._aabb_overlap(ax, ay, aw, ah, ox, oy, ow, oh):
+                return (ox, oy, ow, oh)
+        return None
+
+    def _floor_top_at(self, x):
+        """y of the highest surface (smallest y) directly under the player at x."""
+        ax = x + self.PB_X
+        aw = self.PB_W
+        floor = self.ground_y
+        for ox, oy, ow, oh in self.obstacles:
+            if ax < ox + ow and ax + aw > ox and oy < floor:
+                floor = oy
+        return floor
 
     def update_layout(self, w, h, ground_y):
-        self.w, self.h, self.ground_y = w, h, ground_y
+        old_ground = self.ground_y
+        self.fb_w, self.fb_h, self.ground_y = w, h, ground_y
+        self.w, self.h = w, h
+        # If the terminal resized, rebuild the world width and re-place obstacles
+        # so they sit on the new ground_y.
+        new_world_w = max(w * WORLD_SCREENS, w + 200)
+        if new_world_w != self.world_w or ground_y != old_ground:
+            self.world_w = new_world_w
+            self._gen_level()
         self.player_x = max(PLAYER_MIN_X, min(self.player_x, self.player_max_x()))
-        # only re-anchor to floor if not mid-jump
         if self.player_grounded:
             self.player_y = self.grounded_y()
+        # clamp camera to world
+        self.camera_x = max(0.0, min(float(self.world_w - self.fb_w), self.camera_x))
 
     def shoot(self):
         now = time.time()
@@ -583,40 +671,79 @@ class World:
             elif k == " ":
                 self.shoot()
 
-        # apply continuous walk based on hold state
+        # ---- horizontal motion with obstacle collision ----
         step = PLAYER_PX_PER_SEC * dt
+        dx = 0.0
         if now_t < self.hold_left_until:
-            self.player_x = max(PLAYER_MIN_X, self.player_x - step)
+            dx -= step
         if now_t < self.hold_right_until:
-            self.player_x = min(self.player_max_x(), self.player_x + step)
+            dx += step
+        if dx != 0.0:
+            new_x = max(PLAYER_MIN_X, min(self.player_max_x(), self.player_x + dx))
+            hit = self._hits_any_obstacle(new_x, self.player_y)
+            if hit:
+                ox, oy, ow, oh = hit
+                # Snap to the side we approached from.
+                if dx > 0:
+                    new_x = ox - self.PB_X - self.PB_W  # left edge of obstacle
+                else:
+                    new_x = ox + ow - self.PB_X         # right edge of obstacle
+                new_x = max(PLAYER_MIN_X, min(self.player_max_x(), new_x))
+            self.player_x = new_x
 
-        # jump physics
+        # ---- vertical motion (jump / fall / land on platforms) ----
         if not self.player_grounded:
             self.player_vy += GRAVITY
-            self.player_y += self.player_vy
-            if self.player_y >= self.grounded_y():
-                self.player_y = self.grounded_y()
-                self.player_vy = 0.0
-                self.player_grounded = True
+            new_y = self.player_y + self.player_vy
+            if self.player_vy > 0:  # falling: try to land on the highest surface
+                old_feet = self.player_y + len(NERD)
+                new_feet = new_y + len(NERD)
+                floor = self._floor_top_at(self.player_x)
+                if new_feet >= floor and old_feet <= floor + 1:
+                    self.player_y = floor - len(NERD)
+                    self.player_vy = 0.0
+                    self.player_grounded = True
+                else:
+                    self.player_y = new_y
+            else:
+                self.player_y = new_y
+        else:
+            # Walked off an edge? If so, switch to falling.
+            if self.player_y < self._floor_top_at(self.player_x) - len(NERD):
+                self.player_grounded = False
 
-        # spawn enemies
+        # ---- camera follow (deadzone) ----
+        screen_x = self.player_x - self.camera_x
+        if screen_x > self.fb_w * CAMERA_DEAD_HI:
+            self.camera_x = self.player_x - self.fb_w * CAMERA_DEAD_HI
+        elif screen_x < self.fb_w * CAMERA_DEAD_LO:
+            self.camera_x = self.player_x - self.fb_w * CAMERA_DEAD_LO
+        self.camera_x = max(0.0, min(float(self.world_w - self.fb_w), self.camera_x))
+
+        # ---- spawn enemies just past the right edge of the camera ----
         now = time.time()
         if (self.spawned < TOTAL_ENEMIES
                 and now >= self.next_spawn
                 and len([e for e in self.enemies if e.alive]) < 4):
             speed = random.uniform(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX)
-            ex = self.w + 2
+            ex = self.camera_x + self.fb_w + 4
             ey = self.ground_y - len(ENEMY_A)
             self.enemies.append(Enemy(ex, ey, speed))
             self.spawned += 1
             self.next_spawn = now + random.uniform(ENEMY_SPAWN_MIN, ENEMY_SPAWN_MAX)
 
-        # pellets
+        # ---- pellets (despawn when off-camera or absorbed by an obstacle) ----
         for p in self.pellets:
             if not p.alive:
                 continue
             p.x += p.vx
-            if p.x < -2 or p.x > self.w + 2:
+            # crate absorption
+            for ox, oy, ow, oh in self.obstacles:
+                if ox <= p.x <= ox + ow and oy <= p.y <= oy + oh:
+                    p.alive = False
+                    break
+            if p.alive and (p.x < self.camera_x - 8
+                            or p.x > self.camera_x + self.fb_w + 8):
                 p.alive = False
         self.pellets = [p for p in self.pellets if p.alive]
 
@@ -656,7 +783,9 @@ class World:
                         e.alive = False
                         self.message = "You took a hit!"
                         self.message_until = time.time() + 1.0
-        self.enemies = [e for e in self.enemies if e.alive or e.x > -16]
+        # despawn enemies that walked far off the left side of the camera
+        cull_x = self.camera_x - 32
+        self.enemies = [e for e in self.enemies if e.alive or e.x > cull_x]
 
         # win/lose
         if self.lives <= 0:
@@ -674,49 +803,65 @@ class World:
 # ===================================================================
 def render_world(fb, world):
     fb.clear(PAL['k'])
-    ground_y, wall_top, wall_bot = draw_background(fb)
+    ground_y, wall_top, wall_bot = draw_background(fb, world.camera_x)
     if ground_y != world.ground_y:
         world.update_layout(fb.w, fb.h, ground_y)
 
-    # decoration: a torch on the back wall and a crate on the floor
-    crate_x = max(20, fb.w // 4)
-    crate_y = ground_y - len(CRATE)
-    fb.blit_sprite(CRATE, crate_x, crate_y)
-    torch_x = max(40, fb.w * 3 // 5)
-    torch_y = wall_top + 4
-    # torch glow (soft halo)
-    for d in range(5):
-        rr = 6 - d
-        for dx in range(-rr, rr + 1):
-            fb.set(torch_x + 2 + dx, torch_y + d - 2, PAL['j'])
-    fb.blit_sprite(TORCH, torch_x, torch_y)
+    cx = int(world.camera_x)
 
-    # enemies (back to front by x)
+    # Torches sprinkled along the back wall, in world coords.
+    torch_h = len(TORCH)
+    torch_w = len(TORCH[0])
+    for tx_w in world.torches:
+        sx = tx_w - cx
+        if -torch_w <= sx < fb.w + torch_w:
+            ty = wall_top + 4
+            # glow halo (drawn before torch so it sits behind)
+            for d in range(5):
+                rr = 6 - d
+                for dx in range(-rr, rr + 1):
+                    fb.set(sx + 2 + dx, ty + d - 2, PAL['j'])
+            fb.blit_sprite(TORCH, sx, ty)
+
+    # Obstacles: stack of CRATE sprites
+    crate_h = len(CRATE)
+    crate_w = len(CRATE[0])
+    for ox, oy, ow, oh in world.obstacles:
+        sx = ox - cx
+        if -ow <= sx < fb.w + ow:
+            n = oh // crate_h
+            for i in range(n):
+                fb.blit_sprite(CRATE, sx, oy + i * crate_h)
+
+    # Enemies (back to front by world x). Cull off-screen.
     for e in sorted(world.enemies, key=lambda e: -e.x):
         if not e.alive:
             continue
-        frame = ENEMY_A if int(e.anim_t * 6) % 2 == 0 else ENEMY_B
-        # enemies face left toward player
-        fb.blit_sprite(frame, int(e.x), int(e.y), flip=True)
+        sx = int(e.x) - cx
+        if -16 <= sx < fb.w + 16:
+            frame = ENEMY_A if int(e.anim_t * 6) % 2 == 0 else ENEMY_B
+            fb.blit_sprite(frame, sx, int(e.y), flip=True)
 
-    # player
-    fb.blit_sprite(NERD, int(world.player_x), int(world.player_y),
+    # Player
+    psx = int(world.player_x) - cx
+    fb.blit_sprite(NERD, psx, int(world.player_y),
                    flip=not world.player_face_right)
 
-    # pellets: 2x2 ball + glow + trailing streak
+    # Pellets: 2x2 ball + glow + trailing streak
     for p in world.pellets:
         if not p.alive:
             continue
-        px, py = int(p.x), int(p.y)
+        spx = int(p.x) - cx
+        py = int(p.y)
         # streak (4 px tail) opposite to direction
         sign = -1 if p.vx > 0 else 1
         for d in range(1, 5):
-            fb.set(px + sign * d, py, PAL['o'])
+            fb.set(spx + sign * d, py, PAL['o'])
         # glow halo
         for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            fb.set(px + dx, py + dy, PAL['o'])
+            fb.set(spx + dx, py + dy, PAL['o'])
         # core ball (2x2)
-        fb.fill_rect(px, py, 2, 2, PAL['O'])
+        fb.fill_rect(spx, py, 2, 2, PAL['O'])
 
     # HUD bar (top): score + lives only (title is on splash)
     hud_h = 9

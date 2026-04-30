@@ -458,6 +458,59 @@ LEVEL_ENEMIES = {
     3: (KAREN_A, KAREN_B),
 }
 
+# ---- EVAN MODE: black-and-white French bulldogs replace enemies, hearts
+# replace pellets. Activate with `python3 game.py --evan`. Sprite uses
+# 'b' (boots near-black) for spots and '8' (floppy white) for the white
+# coat -- neither is overridden by any level theme so dogs stay
+# black-and-white in all 3 worlds. 'M' is the existing mouth red,
+# perfect for tongue-out.
+FRENCHIE_A = [
+    ".b.b....b.b.",
+    ".bbb....bbb.",
+    ".b888888888.",
+    ".88b88b8888.",
+    ".88888b8888.",
+    ".888MMMM888.",
+    ".88b8888b88.",
+    ".b888888888.",
+    ".bb888b8888.",
+    ".bb88888888.",
+    ".bb8b8888bb.",
+    ".bbbbbbbbbb.",
+    ".bb......bb.",
+    ".bb......bb.",
+    ".bb......bb.",
+    ".ii......ii.",
+]
+FRENCHIE_B = [
+    ".b.b....b.b.",
+    ".bbb....bbb.",
+    ".b888888888.",
+    ".88b88b8888.",
+    ".88888b8888.",
+    ".888MMMM888.",
+    ".88b8888b88.",
+    ".b888888888.",
+    ".bb888b8888.",
+    ".bb88888888.",
+    ".bb8b8888bb.",
+    ".bbbbbbbbbb.",
+    "..bb....bb..",   # legs shifted slightly for animation
+    "..bb....bb..",
+    "..bb....bb..",
+    "..ii....ii..",
+]
+
+# 5x5 heart pellet for Evan Mode. 'R' is rubber-band red (always defined,
+# never retinted), 'l' is the bright powerup core for a soft highlight.
+HEART = [
+    ".R.R.",
+    "RlRRR",
+    "RRRRR",
+    ".RRR.",
+    "..R..",
+]
+
 # 10x9 crate decoration
 CRATE = [
     "cccccccccc",
@@ -1314,6 +1367,9 @@ class World:
         self.ssl_cert = None
         # current level (1..FINAL_LEVEL). Persists across level transitions.
         self.level = 1
+        # Evan Mode: cosmetic flag that swaps enemies for French bulldogs
+        # and pellets for hearts. Set externally after construction.
+        self.evan_mode = False
         # disks collected count (total floppies set by _gen_level)
         self.disks = 0
         self.disks_total = 0
@@ -1872,6 +1928,34 @@ class World:
                         e.alive = False
                         self.message = "You took a hit!"
                         self.message_until = time.time() + 1.0
+        # Despawn enemies whose footing has gone out from under them. This
+        # covers two cases:
+        #   (a) the snap-out-of-obstacle push lands them on top of a gap
+        #       and they oscillate between two unwalkable sides
+        #   (b) they spawned in/got pushed onto a gap with no obstacle to
+        #       stand on -- visually they should fall in, gameplay-wise we
+        #       just remove them.
+        for e in self.enemies:
+            if not e.alive:
+                continue
+            center_x = e.x + ENEMY_W // 2
+            if not self._in_gap(int(center_x)):
+                continue
+            # Are we standing on a crate-stack that bridges the gap?
+            on_obs = False
+            for ox, oy, ow, oh in self.obstacles:
+                if (e.x < ox + ow and e.x + ENEMY_W > ox
+                        and abs((e.y + ENEMY_H) - oy) <= 2):
+                    on_obs = True
+                    break
+            if not on_obs:
+                e.alive = False
+                # Don't count the gap-fall as a kill (player wasn't involved),
+                # but decrement spawned so a replacement comes in -- otherwise
+                # bad seeds with a spawn point right next to a gap could
+                # stall the kill quota and block boss progression.
+                self.spawned = max(0, self.spawned - 1)
+
         # despawn enemies that walked far off the left side of the camera
         cull_x = self.camera_x - 32
         self.enemies = [e for e in self.enemies if e.alive or e.x > cull_x]
@@ -2137,9 +2221,12 @@ def render_world(fb, world):
                 fb.surface.blit(surf, (sx, int(b.y)))
 
     # Enemies (back to front by world x). Sprite varies by level:
-    # ghouls (L1), CPUs (L2), Karens (L3). Same r/d/D/V/m/i palette so
-    # the level theme's enemy color overrides apply to all three.
-    enemy_a, enemy_b = LEVEL_ENEMIES.get(world.level, (ENEMY_A, ENEMY_B))
+    # ghouls (L1), CPUs (L2), Karens (L3). Evan Mode replaces all of
+    # them with black-and-white French bulldogs.
+    if world.evan_mode:
+        enemy_a, enemy_b = FRENCHIE_A, FRENCHIE_B
+    else:
+        enemy_a, enemy_b = LEVEL_ENEMIES.get(world.level, (ENEMY_A, ENEMY_B))
     for e in sorted(world.enemies, key=lambda e: -e.x):
         if not e.alive:
             continue
@@ -2153,21 +2240,29 @@ def render_world(fb, world):
     fb.blit_sprite(NERD, psx, int(world.player_y),
                    flip=not world.player_face_right)
 
-    # Pellets: 2x2 ball + glow + trailing streak. PIERCE pellets get a
-    # red core to read as a different round.
+    # Pellets. Evan Mode renders a heart sprite; everyone else gets the
+    # 2x2 ball + glow + trailing streak (PIERCE rounds use a red core).
     for p in world.pellets:
         if not p.alive:
             continue
         spx = int(p.x) - cx
         py = int(p.y)
         sign = -1 if p.vx > 0 else 1
-        glow = PAL['o']
-        core = PAL['D'] if p.pierce else PAL['O']
-        for d in range(1, 5):
-            fb.set(spx + sign * d, py, glow)
-        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            fb.set(spx + dx, py + dy, glow)
-        fb.fill_rect(spx, py, 2, 2, core)
+        if world.evan_mode:
+            # heart at sprite center (heart is 5x5; offset to align with
+            # original 2x2 core anchor)
+            fb.blit_sprite(HEART, spx - 2, py - 2)
+            # tiny pink streak so the heart's velocity reads
+            for d in range(1, 4):
+                fb.set(spx + sign * d, py + 1, PAL['M'])
+        else:
+            glow = PAL['o']
+            core = PAL['D'] if p.pierce else PAL['O']
+            for d in range(1, 5):
+                fb.set(spx + sign * d, py, glow)
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                fb.set(spx + dx, py + dy, glow)
+            fb.fill_rect(spx, py, 2, 2, core)
 
     # Delivery drones (drawn after game entities so they hover overhead).
     # Bob the drone +-2 px on a 1.5 Hz sine so it reads as flying, not
@@ -2264,9 +2359,9 @@ def _draw_lose(fb, world):
     sub = world.end_message.upper()
     sub_w = len(sub) * 6 - 1
     fb.blit_text(sub, max(2, (fb.w - sub_w) // 2), y0 + 18, PAL['Y'])
-    prompt = "Q TO QUIT"
+    prompt = "R RESTART  -  Q QUIT"
     pw = len(prompt) * 6 - 1
-    fb.blit_text(prompt, max(2, (fb.w - pw) // 2), y0 + 28, PAL['C'])
+    fb.blit_text(prompt, max(2, (fb.w - pw) // 2), y0 + 28, PAL['Y'])
 
 
 def _draw_certificate(fb, world):
@@ -2351,7 +2446,7 @@ def _draw_certificate(fb, world):
             fb.blit_text(line, x0, y0 + i * line_h, color)
         prompt_y = y0 + text_h + 2
 
-    prompt = "Q TO QUIT"
+    prompt = "R RESTART  -  Q QUIT"
     pw = len(prompt) * 6 - 1
     fb.blit_text(prompt, max(2, (fb.w - pw) // 2),
                  min(fb.h - 9, prompt_y), border)
@@ -2600,6 +2695,8 @@ def collect_input():
                 keys.append("SHOOT")
             elif event.key == pygame.K_F11:
                 keys.append("TOGGLE_FULLSCREEN")
+            elif event.key == pygame.K_r:
+                keys.append("RESTART")
             elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 enter_flag = True
                 keys.append("ENTER")
@@ -2803,6 +2900,7 @@ def main():
     init_audio()
 
     fullscreen = "--windowed" not in sys.argv
+    evan_mode = ("--evan" in sys.argv) or ("--evan-mode" in sys.argv)
     screen = make_screen(fullscreen)
     clock = pygame.time.Clock()
     fb = Framebuffer(INTERNAL_W, INTERNAL_H)
@@ -2817,6 +2915,7 @@ def main():
 
         # ---- gameplay ----
         world = World(INTERNAL_W, INTERNAL_H)
+        world.evan_mode = evan_mode
         last = time.time()
         while True:
             now = time.time()
@@ -2830,6 +2929,13 @@ def main():
                 screen = make_screen(fullscreen)
             if quit_flag:
                 break
+            # R restarts the run from level 1 when the game has ended
+            if "RESTART" in keys and world.state in ("win", "lose"):
+                _apply_level_palette(1)
+                global _SPRITE_CACHE_VERSION
+                _SPRITE_CACHE_VERSION += 1
+                world = World(INTERNAL_W, INTERNAL_H)
+                world.evan_mode = evan_mode
             if world.state == "playing":
                 world.tick(dt, keys)
 

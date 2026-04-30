@@ -86,8 +86,14 @@ chicken out.
 | `Space`            | Jump                  |
 | `X`                | Shoot slingshot       |
 | `F11`              | Toggle fullscreen     |
+| `R`                | Restart (on win/lose screens) |
 | `Q` or `Esc`       | Quit                  |
 | `Up`               | (reserved for future ladders / vertical movement) |
+
+### Easter eggs
+
+- `python3 game.py --evan` -- **Evan Mode**: enemies become black-and-white
+  French bulldogs and the slingshot fires hearts instead of pellets.
 
 ## How to win
 

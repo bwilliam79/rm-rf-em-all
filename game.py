@@ -101,31 +101,35 @@ LEVEL_THEMES = {
         "boss_tint": (90, 160, 255, 255),
     },
     3: {
-        "name": "DEEP TERMINAL",
+        "name": "CUBICLE FARM",
         "pal": {
-            'k': ( 0,   8,   2),
-            'K': ( 0,  16,   4),
-            'B': ( 0,  28,   8),
-            'j': (12,  30,  12),
-            'J': (40,  80,  30),
-            'u': ( 5,  16,   5),
-            'g': (25,  60,  20),
-            'G': (10,  35,  10),
-            'h': ( 0,  18,   0),
-            'q': (110, 220,  90),
-            # phosphor ghouls
+            # 'sky' band -- ceiling: pale grey tile
+            'k': (110, 115, 120),
+            'K': (130, 135, 140),
+            'B': (150, 155, 160),
+            # cubicle wall: warm beige fabric
+            'j': (180, 165, 130),
+            'J': (210, 195, 160),
+            'u': (140, 125,  95),
+            # carpet floor
+            'g': (115, 110, 105),
+            'G': ( 85,  80,  78),
+            'h': ( 60,  55,  52),
+            'q': (170, 160, 140),
+            # 'phosphor terminal' ghouls -- they leak out of the screens.
+            # Keep them green for nerd theme even in the beige room.
             'r': ( 30,  80,  20),
             'd': ( 80, 200,  50),
             'D': (140, 255,  80),
             'V': (255, 255, 180),
             'm': ( 10,  30,  10),
             'i': ( 20,  60,  20),
-            # Office chair: navy fabric + dark frame
-            'c': ( 50,  70, 130),
-            'C': ( 30,  45,  90),
-            'X': ( 15,  20,  40),
+            # Office chair: dark navy/black for contrast against beige
+            'c': ( 35,  35,  50),
+            'C': ( 20,  20,  35),
+            'X': (  8,   8,  18),
         },
-        "boss_tint": (200, 255,  60, 255),
+        "boss_tint": (220, 220, 230, 255),     # boss is mostly grey/silver
     },
 }
 # Snapshot of the level-1 (i.e. defaults) PAL values so we can restore
@@ -271,6 +275,23 @@ PAL = {
     'v': (200, 165,  20),        # gold shadow
     'S': (255, 240, 160),        # bright gold highlight
     'U': (110,  80,  10),        # dark gold outline
+
+    # Boss-specific colors. These keys aren't used by anything that gets
+    # retinted by level themes, so each boss keeps its own look across
+    # all three palettes.
+    # JABBA blob (level 1 boss): green-yellow slug
+    '+': (190, 215, 100),        # jabba light
+    '-': (140, 165,  70),        # jabba shadow
+    '?': (230, 240, 150),        # jabba highlight
+    # CABLE BUNDLE (level 2 boss): black wires with bristling RAM sticks
+    '0': ( 25,  25,  30),        # cable black
+    '1': ( 60,  60,  70),        # cable mid
+    '2': ( 90, 220,  90),        # RAM stick green
+    '3': (255, 110, 110),        # RAM stick red
+    # OFFICE MANAGER (level 3 boss): dark suit, white shirt, red tie
+    '4': ( 30,  30,  45),        # suit dark
+    '5': (235, 235, 240),        # white shirt
+    '6': (180,  40,  40),        # red tie
 }
 
 # ===================================================================
@@ -370,19 +391,20 @@ SERVER_RACK = [
     "XXXXXXXXXX",
 ]
 
-# 10x9 office chair -- the level-3 obstacle. Five-spoke base, post,
-# cushioned seat, high backrest. Drawn so the player can land on the
-# top of the backrest when jumping (top y stays the same as CRATE).
+# 10x9 office chair -- the level-3 obstacle. Front view: tall padded
+# backrest, wide cushioned seat, post + 5-wheel spider base.
+# Designed for visibility at game scale: the silhouette pops against
+# the beige cubicle wall.
 OFFICE_CHAIR = [
-    "...XXXX...",
-    "..XCCCCX..",
-    "..XCCCCX..",
-    "..XCCCCX..",
-    "..XCCCCX..",
-    "..XCCCCX..",
-    "XXXXccXXXX",
-    "...XccX...",
-    "X.X.XX.X.X",
+    "..XXXXXX..",
+    ".XCCCCCCX.",
+    ".XCCCCCCX.",
+    ".XCCCCCCX.",
+    ".XCCCCCCX.",
+    "XCCCCCCCCX",
+    "XCCCCCCCCX",
+    "....XX....",
+    "X..XXXX..X",
 ]
 
 # 5x6 floppy disk pickup
@@ -469,14 +491,170 @@ SSL_CERT = [
     "UUUUUUU",
 ]
 
-# Boss "OVERLORD" sprite is built at runtime by scaling ENEMY_A/B 2x and
-# tinting purple -- see make_overlord_surfaces() below. Twice the size of
-# a regular ghoul, walks slower, takes BOSS_HP hits to kill.
+# Bosses are 24x32 hand-built sprites, one per level. Footprint and HP
+# are shared across the three; the visuals (and per-level theme tint)
+# vary. _build_boss_* helpers below construct each one programmatically
+# at module load -- avoids the dimension-counting fiasco of hand-typed
+# 24x32 grids.
 BOSS_W = 24
 BOSS_H = 32
 BOSS_HP = 8
 BOSS_PX_PER_SEC = 18.0
-BOSS_TINT = (160,  90, 220, 255)   # purple multiply tint
+BOSS_TINT = (255, 255, 255, 255)   # default no-op tint; level themes set the real one
+
+
+def _ellipse(rows, cx, cy, rx, ry, ch):
+    """Fill an ellipse on a 2D char grid (mutates rows in place)."""
+    H, W = len(rows), len(rows[0])
+    for y in range(H):
+        for x in range(W):
+            d = ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2
+            if d <= 1.0:
+                rows[y][x] = ch
+
+
+def _rect(rows, x0, y0, w, h, ch):
+    H, W = len(rows), len(rows[0])
+    for y in range(y0, y0 + h):
+        for x in range(x0, x0 + w):
+            if 0 <= x < W and 0 <= y < H:
+                rows[y][x] = ch
+
+
+def _build_jabba():
+    """Level 1 boss: bulbous green-yellow slug with a tiny head."""
+    rows = [['.'] * BOSS_W for _ in range(BOSS_H)]
+    # Big oval body taking up the bottom 2/3
+    _ellipse(rows, 12, 22, 11, 9, '+')
+    # Smaller head perched on top
+    _ellipse(rows, 12, 8, 6, 6, '+')
+    # Connector neck (so head joins body smoothly)
+    _rect(rows, 9, 11, 6, 5, '+')
+    # Shadow speckles on the lower-right of the body
+    for y in range(18, 31):
+        for x in range(0, BOSS_W):
+            if rows[y][x] == '+' and ((x * 3 + y) % 11 == 0 or (x + y * 2) % 13 == 0):
+                rows[y][x] = '-'
+    # Highlight streak on the upper-left of the body
+    for y in range(13, 22):
+        for x in range(2, 12):
+            if rows[y][x] == '+' and (x + y) % 7 == 0:
+                rows[y][x] = '?'
+    # Eyes
+    for x, y in [(8, 6), (9, 6), (15, 6), (16, 6),
+                 (8, 7), (9, 7), (15, 7), (16, 7)]:
+        if 0 <= x < BOSS_W and 0 <= y < BOSS_H:
+            rows[y][x] = 'V'
+    # Wide grinning mouth
+    for x in range(8, 17):
+        if 0 <= x < BOSS_W:
+            rows[10][x] = 'm'
+    for x in range(9, 16):
+        if 0 <= x < BOSS_W:
+            rows[11][x] = 'm'
+    return [''.join(r) for r in rows]
+
+
+def _build_cable_bundle():
+    """Level 2 boss: a black mass of networking cables with bristling
+    memory sticks and red eyes peeking through."""
+    rows = [['.'] * BOSS_W for _ in range(BOSS_H)]
+    # Main body: irregular roundish shape -- ellipse with bumps
+    _ellipse(rows, 12, 17, 11, 12, '0')
+    # Top "bun" of cables
+    _ellipse(rows, 12, 6, 8, 5, '0')
+    _rect(rows, 4, 6, 16, 12, '0')      # connector slab
+    # Cable highlight rows: alternate horizontal bands of '1' (cable mid)
+    for y in range(BOSS_H):
+        for x in range(BOSS_W):
+            if rows[y][x] == '0' and y % 2 == 0:
+                if (x + y // 2) % 4 == 0:
+                    rows[y][x] = '1'
+    # Memory sticks bristling from the sides. Each stick is a 1x4
+    # horizontal '2' (green PCB) with a '1' (gold contact) cap.
+    sticks = [
+        (0, 9, 5, '2'),     # left stick
+        (19, 11, 5, '3'),   # right stick (red PCB)
+        (0, 21, 5, '3'),
+        (19, 19, 5, '2'),
+        (0, 14, 4, '2'),
+        (20, 24, 4, '3'),
+    ]
+    for sx, sy, slen, color in sticks:
+        for k in range(slen):
+            xx = sx + k
+            if 0 <= xx < BOSS_W and 0 <= sy < BOSS_H:
+                rows[sy][xx] = color
+        # gold contact pin at the connector end (whichever end is in body)
+        contact_x = sx + slen - 1 if sx == 0 else sx
+        if 0 <= contact_x < BOSS_W:
+            rows[sy][contact_x] = '1'
+    # Two glowing red eyes peeking out of the cable mass
+    for x, y in [(9, 12), (10, 12), (14, 12), (15, 12)]:
+        if 0 <= x < BOSS_W and 0 <= y < BOSS_H:
+            rows[y][x] = '3'
+    return [''.join(r) for r in rows]
+
+
+def _build_office_manager():
+    """Level 3 boss: pudgy office manager in a suit with red tie + glasses."""
+    rows = [['.'] * BOSS_W for _ in range(BOSS_H)]
+    # Round head (skin)
+    _ellipse(rows, 12, 6, 5, 4, 's')
+    # Hair on top
+    _rect(rows, 8, 2, 9, 2, 'H')
+    _rect(rows, 7, 3, 11, 1, 'H')
+    # Glasses (frames + lenses)
+    for x in [9, 10, 13, 14]:
+        rows[6][x] = 'F'    # frame
+        rows[7][x] = 'L'    # lens
+    rows[6][11] = 'F'
+    rows[6][12] = 'F'       # bridge
+    # Tiny nose / mouth
+    rows[8][11] = 'x'
+    rows[8][12] = 'x'
+    rows[9][10] = 'M'
+    rows[9][11] = 'M'
+    rows[9][12] = 'M'
+    # Wide pudgy torso (suit jacket)
+    _ellipse(rows, 12, 18, 10, 7, '4')
+    # Belly bulge -- white shirt visible through unbuttoned middle
+    _rect(rows, 10, 14, 5, 8, '5')
+    # Tie down the middle of the shirt
+    for y in range(14, 22):
+        rows[y][12] = '6'
+    rows[14][11] = '6'
+    rows[14][13] = '6'
+    rows[15][12] = '6'
+    # Suit lapels framing the shirt
+    for y in range(14, 19):
+        rows[y][9] = '4'
+        rows[y][15] = '4'
+    # Arms hanging at sides (suit color)
+    for y in range(15, 25):
+        if 0 <= y < BOSS_H:
+            rows[y][2] = '4'
+            rows[y][3] = '4'
+            rows[y][20] = '4'
+            rows[y][21] = '4'
+    # Legs (suit pants) stamped at bottom
+    for y in range(25, 32):
+        rows[y][9] = '4'
+        rows[y][10] = '4'
+        rows[y][13] = '4'
+        rows[y][14] = '4'
+    # Shoes
+    for x in [8, 9, 10, 11]:
+        rows[31][x] = 'X'
+    for x in [12, 13, 14, 15]:
+        rows[31][x] = 'X'
+    return [''.join(r) for r in rows]
+
+
+JABBA_BOSS         = _build_jabba()
+CABLE_BUNDLE_BOSS  = _build_cable_bundle()
+OFFICE_MANAGER_BOSS = _build_office_manager()
+BOSS_SPRITES = {1: JABBA_BOSS, 2: CABLE_BUNDLE_BOSS, 3: OFFICE_MANAGER_BOSS}
 
 # 4x6 torch (wall sconce)
 TORCH = [
@@ -658,25 +836,20 @@ def _apply_level_palette(level):
     _OVERLORD_CACHE.clear()
 
 
-_OVERLORD_CACHE = {}   # ('A'|'B', flip) -> pygame.Surface
+_OVERLORD_CACHE = {}   # (level, flip) -> pygame.Surface
 
 
-def _get_overlord_surface(anim_t, flip):
-    """Build the boss sprite by scaling the regular ghoul 2x and tinting
-    purple. Cached so we only pay the cost once per (frame, flip)."""
-    frame = "A" if int(anim_t * 6) % 2 == 0 else "B"
-    key = (frame, bool(flip))
+def _get_overlord_surface(level, flip):
+    """Return the boss sprite for the current level, flipped if needed.
+    Cached so the per-pixel surface build only runs once per (level, flip)."""
+    key = (level, bool(flip))
     cached = _OVERLORD_CACHE.get(key)
     if cached is not None:
         return cached
-    base = _make_sprite_surface(ENEMY_A if frame == "A" else ENEMY_B,
-                                flip=flip)
-    big = pygame.transform.scale(base, (BOSS_W, BOSS_H))
-    tint = pygame.Surface((BOSS_W, BOSS_H), pygame.SRCALPHA)
-    tint.fill(BOSS_TINT)
-    big.blit(tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-    _OVERLORD_CACHE[key] = big
-    return big
+    sprite = BOSS_SPRITES.get(level, BOSS_SPRITES[1])
+    surf = _make_sprite_surface(sprite, flip=flip)
+    _OVERLORD_CACHE[key] = surf
+    return surf
 
 
 # ===================================================================
@@ -826,55 +999,74 @@ def _draw_wall_servers(fb, cx, wall_top, wall_bot):
 
 
 def _draw_wall_desks(fb, cx, wall_top, wall_bot, ground_y):
-    """Level 3: a row of office cubicles with monitors at desk height.
-    The 'desk row' sits along the back wall above the floor."""
+    """Level 3: a row of beige cubicles with CRT terminal monitors at
+    desk height. The terminal screens flicker phosphor green text on
+    a dark background -- the only green in the otherwise grey/beige room."""
     w = fb.w
-    # Faint horizontal cubicle separators every 5 px (subtle texture)
-    for r in range(wall_top + 2, wall_bot, 5):
-        for x in range(0, w, 2):
+    # Faint horizontal cubicle fabric weave
+    for r in range(wall_top + 2, wall_bot, 4):
+        for x in range(0, w, 3):
             fb.set(x, r, PAL['u'])
-    # Vertical cubicle dividers every 24 px
-    cube_w = 24
+    # Vertical cubicle dividers every 28 px
+    cube_w = 28
     first = -(cx % cube_w)
     for sx in range(first, w + cube_w, cube_w):
         if 0 <= sx < w:
             for yy in range(wall_top + 1, wall_bot + 1):
                 fb.set(sx, yy, PAL['u'])
-    # Monitors: place one near desk-height inside each cubicle
-    desk_y = ground_y - 18    # monitors sit ~18 px above the floor
-    monitor_w = 9
-    monitor_h = 7
+            # Highlight on the divider's right face
+            if sx + 1 < w:
+                for yy in range(wall_top + 1, wall_bot + 1, 2):
+                    fb.set(sx + 1, yy, PAL['J'])
+    # Desk surface line (warm wood-ish): a thin band a few px above floor
+    desk_top_y = ground_y - 14
+    for x in range(w):
+        fb.set(x, desk_top_y, (95, 70, 45))
+        fb.set(x, desk_top_y + 1, (135, 100, 65))
+    # CRT monitors sitting on the desk -- one per cubicle.
+    monitor_w = 11
+    monitor_h = 9
     for sx in range(first, w + cube_w, cube_w):
         mx = sx + (cube_w - monitor_w) // 2
-        if -monitor_w <= mx < w + monitor_w:
-            # bezel
+        my = desk_top_y - monitor_h - 1
+        if -monitor_w <= mx < w + monitor_w and my >= wall_top:
+            # Cream/beige plastic bezel
             for ix in range(monitor_w):
                 for iy in range(monitor_h):
                     px = mx + ix
-                    py = desk_y + iy
+                    py = my + iy
                     if 0 <= px < w and wall_top <= py <= wall_bot:
-                        if ix == 0 or ix == monitor_w - 1 \
-                                or iy == 0 or iy == monitor_h - 1:
-                            fb.set(px, py, (40, 40, 50))   # bezel dark grey
+                        on_edge = (ix == 0 or ix == monitor_w - 1
+                                   or iy == 0 or iy == monitor_h - 1)
+                        if on_edge:
+                            fb.set(px, py, (200, 190, 160))
                         else:
-                            # phosphor screen with a few bright pixels
-                            base = (35, 90, 35)
-                            fb.set(px, py, base)
-            # a few "code" pixels on the monitor face
-            rng = random.Random((sx + cx * 17) & 0xFFFF)
-            for _ in range(4):
-                ix = rng.randint(1, monitor_w - 2)
-                iy = rng.randint(1, monitor_h - 2)
+                            # screen interior: dark phosphor background
+                            fb.set(px, py, (12, 18, 12))
+            # Green terminal text rows (~3 visible code lines)
+            rng = random.Random((sx + 99991) & 0xFFFF)
+            for line in range(3):
+                line_y = my + 2 + line * 2
+                # leading prompt char on each line
+                fb.set(mx + 2, line_y, (120, 240, 120))
+                # then a varying number of bright pixels for 'code'
+                length = rng.randint(3, monitor_w - 5)
+                for k in range(length):
+                    px = mx + 4 + k
+                    if px < mx + monitor_w - 1:
+                        if rng.random() < 0.7:
+                            fb.set(px, line_y, (120, 240, 120))
+            # CRT stand (wider chunky base) -- sits on the desk
+            base_y = my + monitor_h
+            for ix in range(2, monitor_w - 2):
                 px = mx + ix
-                py = desk_y + iy
-                if 0 <= px < w and wall_top <= py <= wall_bot:
-                    fb.set(px, py, (140, 255, 140))
-            # monitor stand
-            stand_x = mx + monitor_w // 2
-            for iy in range(monitor_h, monitor_h + 2):
-                py = desk_y + iy
-                if 0 <= stand_x < w and wall_top <= py <= wall_bot:
-                    fb.set(stand_x, py, (60, 60, 70))
+                if 0 <= px < w and base_y <= wall_bot:
+                    fb.set(px, base_y, (160, 150, 130))
+            # tiny power LED bottom-right of bezel
+            led_x = mx + monitor_w - 2
+            led_y = my + monitor_h - 2
+            if 0 <= led_x < w and wall_top <= led_y <= wall_bot:
+                fb.set(led_x, led_y, (255, 200, 80))
 
 
 def lerp_rgb(a, b, t):
@@ -1789,7 +1981,7 @@ def render_world(fb, world):
         b = world.boss
         sx = int(b.x) - cx
         if -BOSS_W <= sx < fb.w + BOSS_W:
-            surf = _get_overlord_surface(b.anim_t, b.vx < 0)
+            surf = _get_overlord_surface(world.level, b.vx < 0)
             if time.time() < b.flash_until:
                 # Flash white when hit
                 flash = surf.copy()

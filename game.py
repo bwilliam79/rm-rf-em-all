@@ -836,19 +836,18 @@ class World:
 
         def _carry_walk_through_action():
             """In cbreak mode macOS only auto-repeats the most recently
-            held key. So while the player is mashing X to shoot or SPACE
+            held key. While the player mashes X to shoot or holds SPACE
             to jump, the LEFT/RIGHT auto-repeat is suspended and the hold
-            window expires. If we saw a direction press in the last 0.5 s,
-            re-arm the hold for whichever side was pressed most recently
-            so movement keeps going through the action."""
-            if (now_t - max(self.last_press_left, self.last_press_right)) >= 0.5:
-                return
-            if self.last_press_right >= self.last_press_left:
-                self.hold_right_until = max(self.hold_right_until,
-                                            now_t + MOVE_HOLD_S)
-            else:
-                self.hold_left_until = max(self.hold_left_until,
-                                           now_t + MOVE_HOLD_S)
+            window would expire. Keep the walk going as long as the
+            player IS currently walking (hold not yet expired) -- and
+            also bump last_press_* so the next action key in the chain
+            still finds 'currently walking' true."""
+            if now_t < self.hold_right_until:
+                self.hold_right_until = now_t + MOVE_HOLD_S
+                self.last_press_right = now_t
+            elif now_t < self.hold_left_until:
+                self.hold_left_until = now_t + MOVE_HOLD_S
+                self.last_press_left = now_t
 
         for k in keys:
             if k == "LEFT":

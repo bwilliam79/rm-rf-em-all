@@ -180,6 +180,8 @@ SFX_SPECS = {
     # Looping drone propeller buzz: square-wave carrier with a gentle
     # 25 Hz amplitude modulation that reads as 'rotor blades passing'.
     "drone": ((230.0, 230.0),  0.50, "buzz"),
+    # Evan Mode: a happy two-yip bark instead of the regular kill blip.
+    "bark":  ((700.0, 320.0),  0.32, "bark"),
 }
 _SFX_CACHE = {}        # name -> pygame.mixer.Sound
 _MUSIC_PATH = None     # path to the theme WAV (set in init_audio)
@@ -464,41 +466,44 @@ LEVEL_ENEMIES = {
 # coat -- neither is overridden by any level theme so dogs stay
 # black-and-white in all 3 worlds. 'M' is the existing mouth red,
 # perfect for tongue-out.
+# Mostly black-coated Frenchie like the reference: predominantly black
+# body with a small white chest patch and a hint of white on the snout,
+# plus the iconic pointy bat ears jutting up from a smushed black face.
 FRENCHIE_A = [
-    ".b.b....b.b.",
-    ".bbb....bbb.",
-    ".b888888888.",
-    ".88b88b8888.",
-    ".88888b8888.",
-    ".888MMMM888.",
-    ".88b8888b88.",
-    ".b888888888.",
-    ".bb888b8888.",
-    ".bb88888888.",
-    ".bb8b8888bb.",
-    ".bbbbbbbbbb.",
-    ".bb......bb.",
-    ".bb......bb.",
-    ".bb......bb.",
-    ".ii......ii.",
+    "...b....b...",   # 0:  ear tips (two clear single-pixel points)
+    "..bb....bb..",   # 1:  ears 2 wide
+    ".bbb....bbb.",   # 2:  ears 3 wide tapering
+    "bbbbb..bbbbb",   # 3:  ear bases blending into head sides
+    "bbbbbbbbbbbb",   # 4:  black head top
+    "bVbbbbbbbbVb",   # 5:  eye highlights (V = bright eyes on black face)
+    "bbbbbbbbbbbb",   # 6:  forehead between eyes and snout
+    "bbbbb88bbbbb",   # 7:  small white blaze on the snout
+    "bbbb8MM8bbbb",   # 8:  muzzle with tongue out (M)
+    "bbbbb88bbbbb",   # 9:  chin -- white tapers back down
+    "bbbbbbbbbbbb",   # 10: neck / shoulders solid black
+    "bbb88888bbbb",   # 11: WHITE CHEST PATCH (the iconic Frenchie tuxedo)
+    "bbbbbbbbbbbb",   # 12: barrel body
+    ".bbb..bbb...",   # 13: stocky front + back legs
+    ".bbb..bbb...",   # 14: legs continued
+    ".ii....ii...",   # 15: paws
 ]
 FRENCHIE_B = [
-    ".b.b....b.b.",
+    "...b....b...",
+    "..bb....bb..",
     ".bbb....bbb.",
-    ".b888888888.",
-    ".88b88b8888.",
-    ".88888b8888.",
-    ".888MMMM888.",
-    ".88b8888b88.",
-    ".b888888888.",
-    ".bb888b8888.",
-    ".bb88888888.",
-    ".bb8b8888bb.",
-    ".bbbbbbbbbb.",
-    "..bb....bb..",   # legs shifted slightly for animation
-    "..bb....bb..",
-    "..bb....bb..",
-    "..ii....ii..",
+    "bbbbb..bbbbb",
+    "bbbbbbbbbbbb",
+    "bVbbbbbbbbVb",
+    "bbbbbbbbbbbb",
+    "bbbbb88bbbbb",
+    "bbbb8MM8bbbb",
+    "bbbbb88bbbbb",
+    "bbbbbbbbbbbb",
+    "bbb88888bbbb",
+    "bbbbbbbbbbbb",
+    "..bbb..bbb..",   # legs shifted right 1 for the walk frame
+    "..bbb..bbb..",
+    "..ii...ii...",
 ]
 
 # 5x5 heart pellet for Evan Mode. 'R' is rubber-band red (always defined,
@@ -1908,7 +1913,9 @@ class World:
                     self.kills += 1
                     self.message = random.choice(KILL_TAUNTS)
                     self.message_until = time.time() + 1.4
-                    play("kill")
+                    # Evan Mode: a Frenchie hit with a heart yips happily
+                    # instead of the regular kill sound effect.
+                    play("bark" if self.evan_mode else "kill")
                     self._maybe_send_drone(e.x, e.y)
                     break
             # touch player (full bbox so jumping clears them)
@@ -2496,6 +2503,30 @@ def _generate_sfx_wav(spec, path):
                 env = 1.0 - (i / max(1, per - 1)) * 0.5  # slight per-note decay
                 v = VOL if (i % period) < half else -VOL
                 samples[idx] = max(-32767, min(32767, int(v * env)))
+    elif mode == "bark":
+        # Happy two-yip Frenchie bark. f0 is the starting pitch of the
+        # first yip; the synth glides each yip down toward f1. Two yips
+        # back-to-back with a tiny pause between them.
+        rng = random.Random(0xB1A8)
+        for i in range(n):
+            progress = i / max(1, n - 1)
+            if progress < 0.40:                    # first yip
+                p = progress / 0.40
+                freq = f0 - (f0 - f1) * p
+                env = (1.0 - p) ** 0.7
+            elif progress < 0.55:                  # tiny gap between yips
+                samples[i] = 0
+                continue
+            else:                                  # second yip (slightly lower)
+                p = (progress - 0.55) / 0.45
+                freq = (f0 * 0.85) - ((f0 * 0.85) - (f1 * 0.85)) * p
+                env = (1.0 - p) ** 0.6
+            period = max(2, int(round(SR / freq)))
+            half = period // 2
+            # Slight chaos to give it vocal texture
+            chaos = rng.uniform(0.9, 1.1)
+            v = VOL if (i % period) < half else -VOL
+            samples[i] = max(-32767, min(32767, int(v * env * chaos * 0.85)))
     elif mode == "buzz":
         # Drone propeller, designed to actually sound like a quadcopter:
         #

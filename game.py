@@ -124,10 +124,11 @@ LEVEL_THEMES = {
             'V': (255, 255, 180),
             'm': ( 10,  30,  10),
             'i': ( 20,  60,  20),
-            # Office chair: dark navy/black for contrast against beige
-            'c': ( 35,  35,  50),
-            'C': ( 20,  20,  35),
-            'X': (  8,   8,  18),
+            # Office chair: brighter mesh-red so it actually pops against
+            # the beige cubicle walls.
+            'c': (220,  80,  80),    # mesh fabric (bright red)
+            'C': (160,  40,  45),    # mid red
+            'X': ( 70,  15,  20),    # frame / wheels (deep maroon)
         },
         "boss_tint": (220, 220, 230, 255),     # boss is mostly grey/silver
     },
@@ -397,14 +398,14 @@ SERVER_RACK = [
 # the beige cubicle wall.
 OFFICE_CHAIR = [
     "..XXXXXX..",
+    ".XCCccccX.",   # mesh fabric highlight on the upper back
+    ".XCCccccX.",
+    ".XCCcccCX.",
     ".XCCCCCCX.",
-    ".XCCCCCCX.",
-    ".XCCCCCCX.",
-    ".XCCCCCCX.",
-    "XCCCCCCCCX",
-    "XCCCCCCCCX",
-    "....XX....",
-    "X..XXXX..X",
+    "XCCCCCCCCX",   # shoulder/seat edge
+    "XccccccccX",   # seat cushion (lighter than the back)
+    "....XX....",   # gas-lift post
+    "X..XXXX..X",   # 5-spoke wheel base
 ]
 
 # 5x6 floppy disk pickup
@@ -1240,7 +1241,11 @@ class World:
         self.gaps = []
         self.floppies = []
         self.powerups = []
-        rng = random.Random(0xC0FFEE ^ self.world_w ^ self.ground_y)
+        # Fold the level number into the seed so each level gets its own
+        # arrangement of crates, gaps, and floppies (without it, all three
+        # levels generated the exact same layout).
+        rng = random.Random(0xC0FFEE ^ self.world_w ^ self.ground_y
+                            ^ (self.level * 0x9E3779B1))
         crate_w, crate_h = len(CRATE[0]), len(CRATE)  # 10 x 9
         # Walk left-to-right placing one feature per step. Maintain a buffer of
         # "safe ground" before and after each gap so the player has takeoff +
@@ -1283,6 +1288,15 @@ class World:
         if not self.gaps:
             mid = self.world_w // 2
             self.gaps.append((mid - 8, mid + 8))
+        # Same guarantee for obstacles -- on some seeds the weighted-choice
+        # roll skipped 'crate' enough times to produce zero, leaving the
+        # level featureless. Force-place 2 single-stack obstacles at
+        # 1/3 and 2/3 of the world if we ended up with fewer than 2.
+        crate_w, crate_h = len(CRATE[0]), len(CRATE)
+        while len(self.obstacles) < 2:
+            slot = self.world_w // 3 if len(self.obstacles) == 0 else (2 * self.world_w) // 3
+            ox = self._nearest_safe_x(slot)
+            self.obstacles.append((ox, self.ground_y - crate_h, crate_w, crate_h))
         # One RAPID powerup at the level's midpoint, lifted off the ground a
         # bit so it visually reads as a pickup instead of debris.
         rx = self.world_w // 2
@@ -1457,8 +1471,10 @@ class World:
         _apply_level_palette(self.level)
         global _SPRITE_CACHE_VERSION
         _SPRITE_CACHE_VERSION += 1
-        # Reset world state for a fresh playfield
+        # Reset world state for a fresh playfield. Disks reset per-level
+        # (consistent with kills) so the HUD can never show > total.
         self.kills = 0
+        self.disks = 0
         self.spawned = 0
         self.next_spawn = time.time() + random.uniform(ENEMY_SPAWN_MIN, ENEMY_SPAWN_MAX)
         self.enemies = []
@@ -2065,7 +2081,9 @@ def render_world(fb, world):
         stat = med
     else:
         stat = short
-    fb.blit_text(stat, 2, 1, PAL['C'])
+    # HUD text always gold -- 'C' was getting overridden to dark navy in
+    # the level-3 cubicle palette, making the stats unreadable.
+    fb.blit_text(stat, 2, 1, PAL['Y'])
     if weapon_text:
         fb.blit_text(weapon_text, fb.w - weapon_w - 2, 1, PAL['Y'])
 

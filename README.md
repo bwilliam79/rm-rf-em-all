@@ -21,25 +21,36 @@ prompt also blinks; this is a static snapshot.)*
 
 ### In-game
 
-Side-scrolling pixel diorama: lab-coat nerd mid-jump between two crate
-stacks, torchlit brick corridor, slingshot pellet in flight. The world
-is several screens wide and the camera follows the player.
+Side-scrolling pixel diorama: lab-coat nerd mid-jump over a pit, RAPID
+powerup glowing on the ground, floppy-disk pickups scattered around,
+torchlit brick corridor, slingshot pellet mid-flight, ghoul on the
+right. The world is several screens wide and the camera follows the
+player.
 
-![in-game: lab-coat nerd jumping between crate stacks in a torchlit brick corridor](docs/ingame.png)
+![in-game: lab-coat nerd mid-jump over a pit with floppies, a RAPID powerup, and a ghoul](docs/ingame.png)
 
 *(Same source: real framebuffer output, 4x nearest-neighbor upscale.
 The actual game renders this scene live in your terminal using
 upper-half-block characters with truecolor fg/bg per cell, doubling the
 vertical pixel resolution.)*
 
+### End-of-level certificate
+
+Kill all 8 ghouls AND walk to the right edge of the level and you get
+a fake-terminal certificate of root access:
+
+![end-of-level certificate: phosphor-green bordered fake terminal output listing GHOULS, DISKS, LIVES, LICENSE WTFPL, .ANXIETY DELETED.](docs/certificate.png)
+
 ## What it is
 
 A pure-stdlib Python pixel-art side-scroller. The world is a few
-screens wide, the camera follows you, and there are crate stacks
-scattered along the way to jump on or over. Ghouls shamble in from
-the right; you pelt them with a slingshot. Color rendering via ANSI
-truecolor + `▀` half-block characters, plus a pile of dumb taunts.
-Crude on purpose.
+screens wide, the camera follows you, and there are crate stacks to
+jump on or over, **pits in the floor** to leap over (or fall into and
+respawn), **floppy disks** to collect, and a one-shot **RAPID powerup**
+that halves the slingshot cooldown for 8 seconds. Kill all the ghouls
+and reach the right edge to receive a goofy "root access granted"
+certificate. Color rendering via ANSI truecolor + `▀` half-block
+characters, plus a pile of dumb taunts. Crude on purpose.
 
 ## Requirements
 
@@ -64,13 +75,17 @@ dir and loops it during the splash. Press **ENTER** to start the game
 | Key           | Action                |
 |---------------|-----------------------|
 | `Left` / `Right` | Walk left / right  |
-| `Up`          | Jump                  |
-| `Space`       | Shoot slingshot       |
+| `Space`       | Jump                  |
+| `X`           | Shoot slingshot       |
 | `Q`           | Quit                  |
+| `Up`          | (reserved for future ladders / vertical movement) |
 
 ## How to win
 
-Kill every enemy before they touch you. That's the whole game.
+Kill every ghoul (`X` to fire) without losing all your lives, and walk
+to the right edge of the level to claim the certificate. Watch your
+footing -- pits = bad. Grab floppy disks for completionist nerd points
+and the RAPID orb for a brief Contra-style fire-rate boost.
 
 ## How to uninstall
 
@@ -81,6 +96,17 @@ rm -rf em-all
 (It is literally in the name.)
 
 ## Status
+
+**v0.5** -- the level actually feels like a level. Added **pits** in
+the floor (fall in, lose a life, respawn at the last safe ground tile),
+**floppy disk** pickups scattered along the world (some hovering over
+gaps as a jump-bait reward), a single one-shot **RAPID-fire powerup**
+that halves the slingshot cooldown for 8 seconds, and a goofy
+**phosphor-green "root access granted" certificate** at the end of the
+level. Win condition is now: kill all 8 ghouls AND walk to the right
+edge. Controls also shifted to NES/SNES platformer convention --
+**SPACE = jump** (was Up arrow), **X = shoot** (was Space). Up arrow
+is now reserved for future ladders / vertical movement.
 
 **v0.4** -- pivoted from raycaster-FPS to **8-bit pixel-art
 side-scroller**. Renders to a half-block-pixel framebuffer with truecolor

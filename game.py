@@ -161,6 +161,20 @@ PAL = {
     'f': (255, 200, 60),         # fire
     'Y': (255, 240, 130),         # fire bright
     'z': (180, 60, 30),           # fire base
+
+    # floppy disk pickup
+    '7': (50, 50, 75),           # floppy shell (dark plastic)
+    '8': (225, 225, 240),        # floppy label (white)
+    '9': (170, 170, 190),        # floppy slider (silver)
+
+    # rapid-fire pickup glow
+    'Z': (255, 180,  60),        # outer glow
+    'y': (255, 230, 100),        # mid glow
+    'l': (255, 255, 230),        # bright core
+
+    # gap / abyss
+    'a': (  6,   8,  12),        # near-black void
+    'A': ( 16,  18,  24),        # void mid
 }
 
 # ===================================================================
@@ -243,6 +257,25 @@ CRATE = [
     "cCXCCCCXCc",
     "cCCCCCCCCc",
     "XXXXXXXXXX",
+]
+
+# 5x6 floppy disk pickup
+FLOPPY = [
+    "77997",
+    "77777",
+    "78887",
+    "78887",
+    "78887",
+    "77777",
+]
+
+# 5x5 RAPID powerup -- glowing orb
+POWERUP_RAPID = [
+    ".ZZZ.",
+    "ZyyyZ",
+    "ZylyZ",
+    "ZyyyZ",
+    ".ZZZ.",
 ]
 
 # 4x6 torch (wall sconce)
@@ -553,6 +586,21 @@ class World:
         self.enemies = []
         # obstacles (crate stacks) in world coords: list of (x, y, w, h)
         self.obstacles = []
+        # gaps in the floor: list of (x_start, x_end). Inside one of these the
+        # ground is missing -- player falls through.
+        self.gaps = []
+        # collectibles. Each is [x, y, collected].
+        self.floppies = []
+        # power-ups. Each is [kind, x, y, collected].
+        self.powerups = []
+        # last x where player was safely grounded (NOT above a gap). Respawn
+        # point after falling into a pit.
+        self.last_safe_x = float(PLAYER_MIN_X + 4)
+        # rapid-fire timer: fire-rate is doubled while time.time() < rapid_until
+        self.rapid_until = 0.0
+        # disks collected count (total floppies set by _gen_level)
+        self.disks = 0
+        self.disks_total = 0
         self.kills = 0
         self.lives = PLAYER_LIVES
         self.spawned = 0
@@ -566,28 +614,87 @@ class World:
         self._gen_level()
 
     def _gen_level(self):
-        """Place crate stacks and wall torches across the world.
-        Deterministic per (world_w, ground_y)."""
+        """Place crate stacks, gaps in the floor, floppy pickups, a single
+        RAPID powerup, and wall torches across the world. Deterministic per
+        (world_w, ground_y)."""
         self.obstacles = []
         self.torches = []
+        self.gaps = []
+        self.floppies = []
+        self.powerups = []
         rng = random.Random(0xC0FFEE ^ self.world_w ^ self.ground_y)
         crate_w, crate_h = len(CRATE[0]), len(CRATE)  # 10 x 9
-        # Crate stacks. Start past the initial visible area so the player has
-        # elbow room for the first move.
+        # Walk left-to-right placing one feature per step. Maintain a buffer of
+        # "safe ground" before and after each gap so the player has takeoff +
+        # landing room. Floppies sit either on the ground or on top of crates.
         x = self.fb_w + rng.randint(20, 50)
-        while x < self.world_w - 30:
-            # Mostly single crates, occasional 2-stack. No 3-stacks: max jump
-            # only just clears a 2-stack, so a 3 would be a hard wall.
-            stack = rng.choice([1, 1, 1, 1, 2, 2])
-            ow = crate_w
-            oh = stack * crate_h
-            self.obstacles.append((x, self.ground_y - oh, ow, oh))
-            x += rng.randint(36, 84)
+        while x < self.world_w - 60:
+            kind = rng.choices(
+                ["crate", "gap", "floppy_run", "ground"],
+                weights=[4, 3, 3, 1],
+                k=1,
+            )[0]
+            if kind == "crate":
+                stack = rng.choice([1, 1, 1, 1, 2, 2])
+                ow, oh = crate_w, stack * crate_h
+                self.obstacles.append((x, self.ground_y - oh, ow, oh))
+                # 50% chance: floppy on top of the crate
+                if rng.random() < 0.5:
+                    fy = self.ground_y - oh - 7  # 6-px-tall floppy + 1 lift
+                    self.floppies.append([x + ow // 2 - 2, fy, False])
+                x += ow + rng.randint(20, 44)
+            elif kind == "gap":
+                # 14-22 px gap. Max jump arc covers ~56 horizontal so this is
+                # always crossable.
+                gw = rng.randint(14, 22)
+                self.gaps.append((x, x + gw))
+                # Sometimes float a floppy mid-gap as a reward for jumping.
+                if rng.random() < 0.55:
+                    self.floppies.append([x + gw // 2 - 2, self.ground_y - 14, False])
+                x += gw + rng.randint(20, 36)
+            elif kind == "floppy_run":
+                # Two or three floppies on the ground in a short row.
+                n = rng.choice([2, 3])
+                for i in range(n):
+                    self.floppies.append([x + i * 9, self.ground_y - 8, False])
+                x += n * 9 + rng.randint(16, 30)
+            else:  # plain ground
+                x += rng.randint(20, 40)
+        # If RNG produced zero gaps (unlucky on a small world), force one near
+        # the middle so the player sees the pit-jumping mechanic at all.
+        if not self.gaps:
+            mid = self.world_w // 2
+            self.gaps.append((mid - 8, mid + 8))
+        # One RAPID powerup at the level's midpoint, lifted off the ground a
+        # bit so it visually reads as a pickup instead of debris.
+        rx = self.world_w // 2
+        # Don't place on top of an obstacle or in a gap -- shift if needed.
+        rx = self._nearest_safe_x(rx)
+        self.powerups.append(["RAPID", rx, self.ground_y - 12, False])
         # Torches every ~70-110 px on the back wall.
         tx = 30
         while tx < self.world_w - 10:
             self.torches.append(tx)
             tx += rng.randint(60, 110)
+        self.disks_total = len(self.floppies)
+
+    def _nearest_safe_x(self, x):
+        """Nudge x sideways until it's not over a gap or inside an obstacle."""
+        for _ in range(40):
+            if any(gx <= x <= gx2 for gx, gx2 in self.gaps):
+                x += 8
+                continue
+            if any(ox <= x < ox + ow for ox, _, ow, _ in self.obstacles):
+                x += 12
+                continue
+            return x
+        return x
+
+    def _in_gap(self, x):
+        for gx, gx2 in self.gaps:
+            if gx <= x <= gx2:
+                return True
+        return False
 
     def player_max_x(self):
         # Player can walk to the right edge of the WORLD, not the screen.
@@ -613,14 +720,28 @@ class World:
         return None
 
     def _floor_top_at(self, x):
-        """y of the highest surface (smallest y) directly under the player at x."""
+        """y of the highest surface (smallest y) directly under the player at
+        x. Returns a value below the screen if the player's center of mass
+        is over a gap with no obstacle to stand on."""
         ax = x + self.PB_X
         aw = self.PB_W
-        floor = self.ground_y
+        left, right = ax, ax + aw
+        center = ax + aw // 2
+        # Obstacles always provide a surface (they sit in/above gaps too)
+        floor = None
         for ox, oy, ow, oh in self.obstacles:
-            if ax < ox + ow and ax + aw > ox and oy < floor:
-                floor = oy
-        return floor
+            if left < ox + ow and right > ox:
+                if floor is None or oy < floor:
+                    floor = oy
+        if floor is not None:
+            return floor
+        # No obstacle under us. Check whether the player's center is over a
+        # gap; if so, gravity wins. (Center-based, not whole-bbox, so the
+        # player drops after running off the lip rather than skating along it.)
+        for gx, gx2 in self.gaps:
+            if gx <= center <= gx2:
+                return self.fb_h + 999
+        return self.ground_y
 
     def update_layout(self, w, h, ground_y):
         old_ground = self.ground_y
@@ -640,7 +761,8 @@ class World:
 
     def shoot(self):
         now = time.time()
-        if now - self.last_shot < PELLET_COOLDOWN:
+        cooldown = PELLET_COOLDOWN * 0.5 if now < self.rapid_until else PELLET_COOLDOWN
+        if now - self.last_shot < cooldown:
             return
         self.last_shot = now
         # pellet emerges from slingshot tip ~ right side of nerd, mid-height
@@ -649,6 +771,48 @@ class World:
         vx = PELLET_SPEED if self.player_face_right else -PELLET_SPEED
         self.pellets.append(Pellet(sling_x, sling_y, vx))
         play("shoot")
+
+    def _respawn(self):
+        """Send the player back to the last safe ground tile, take a life."""
+        self.lives -= 1
+        if self.lives <= 0:
+            self.state = "lose"
+            self.end_message = random.choice(DEATH_QUOTES)
+            play("lose")
+            return
+        self.player_x = self.last_safe_x
+        self.player_y = self._floor_top_at(self.last_safe_x) - len(NERD)
+        self.player_vy = 0.0
+        self.player_grounded = True
+        self.last_hit = time.time()       # i-frames after respawn
+        self.message = "You fell in. Try harder."
+        self.message_until = time.time() + 1.4
+        play("hit")
+
+    def _check_pickups(self):
+        """Floppy disks + powerups: claim any whose bbox intersects the
+        player. Floppies are 5x6, powerups 5x5 (sprite shapes); use simple
+        rectangle overlap with the player's collision bbox."""
+        ax, ay, aw, ah = self._player_bbox()
+        for f in self.floppies:
+            if f[2]:
+                continue
+            fx, fy = f[0], f[1]
+            if (fx < ax + aw and fx + 5 > ax and fy < ay + ah and fy + 6 > ay):
+                f[2] = True
+                self.disks += 1
+                play("kill")  # reuse the bling sound; no new asset
+        for p in self.powerups:
+            if p[3]:
+                continue
+            px, py = p[1], p[2]
+            if (px < ax + aw and px + 5 > ax and py < ay + ah and py + 5 > ay):
+                p[3] = True
+                if p[0] == "RAPID":
+                    self.rapid_until = time.time() + 8.0
+                    self.message = "*RAPID FIRE*  ROOT++"
+                    self.message_until = time.time() + 1.6
+                    play("kill")
 
     def tick(self, dt, keys):
         if self.state != "playing":
@@ -664,11 +828,14 @@ class World:
             elif k == "RIGHT":
                 self.hold_right_until = now_t + MOVE_HOLD_S
                 self.player_face_right = True
-            elif k == "UP":
+            elif k == " ":
+                # SPACE = jump (NES/SNES platformer convention).
+                # UP is reserved for future ladder/vertical movement.
                 if self.player_grounded:
                     self.player_vy = -JUMP_V0
                     self.player_grounded = False
-            elif k == " ":
+            elif k in ("x", "X"):
+                # X = shoot (Mega Man / NES B-button convention).
                 self.shoot()
 
         # ---- horizontal motion with obstacle collision ----
@@ -711,6 +878,23 @@ class World:
             # Walked off an edge? If so, switch to falling.
             if self.player_y < self._floor_top_at(self.player_x) - len(NERD):
                 self.player_grounded = False
+
+        # ---- safe-ground tracking + fall death ----
+        # last_safe_x is the respawn anchor: player is grounded AND their
+        # center is not over a gap. We won't respawn onto a crate (we land
+        # on the natural ground at that x).
+        if self.player_grounded:
+            center_x = self.player_x + self.PB_X + self.PB_W // 2
+            if not self._in_gap(center_x):
+                self.last_safe_x = self.player_x
+        # Fell off the world?
+        if self.player_y > self.fb_h + 10:
+            self._respawn()
+            if self.state != "playing":
+                return  # game over
+
+        # ---- pickups (floppies + powerups) ----
+        self._check_pickups()
 
         # ---- camera follow (deadzone) ----
         screen_x = self.player_x - self.camera_x
@@ -787,12 +971,13 @@ class World:
         cull_x = self.camera_x - 32
         self.enemies = [e for e in self.enemies if e.alive or e.x > cull_x]
 
-        # win/lose
+        # win/lose. To win you must kill all the ghouls AND walk to the very
+        # right edge of the level -- the certificate is at the end.
         if self.lives <= 0:
             self.state = "lose"
             self.end_message = random.choice(DEATH_QUOTES)
             play("lose")
-        elif self.kills >= TOTAL_ENEMIES:
+        elif self.kills >= TOTAL_ENEMIES and self.player_x >= self.world_w - 30:
             self.state = "win"
             self.end_message = random.choice(WIN_QUOTES)
             play("win")
@@ -808,6 +993,27 @@ def render_world(fb, world):
         world.update_layout(fb.w, fb.h, ground_y)
 
     cx = int(world.camera_x)
+
+    # Carve gaps: replace the ground bands with a void column (slight gradient
+    # so it reads as depth rather than a flat black box).
+    for gx, gx2 in world.gaps:
+        sx0 = max(0, gx - cx)
+        sx1 = min(fb.w, gx2 - cx)
+        if sx1 <= sx0:
+            continue
+        for yy in range(ground_y, fb.h):
+            t = (yy - ground_y) / max(1, fb.h - ground_y - 1)
+            # Top of pit slightly lighter than the deep
+            r = int(PAL['A'][0] + (PAL['a'][0] - PAL['A'][0]) * t)
+            g = int(PAL['A'][1] + (PAL['a'][1] - PAL['A'][1]) * t)
+            b = int(PAL['A'][2] + (PAL['a'][2] - PAL['A'][2]) * t)
+            for x in range(sx0, sx1):
+                fb.set(x, yy, (r, g, b))
+        # Soft lip on each side of the pit (1-px brick-edge highlight)
+        if sx0 - 1 >= 0:
+            fb.set(sx0 - 1, ground_y, PAL['h'])
+        if sx1 < fb.w:
+            fb.set(sx1, ground_y, PAL['h'])
 
     # Torches sprinkled along the back wall, in world coords.
     torch_h = len(TORCH)
@@ -832,6 +1038,25 @@ def render_world(fb, world):
             n = oh // crate_h
             for i in range(n):
                 fb.blit_sprite(CRATE, sx, oy + i * crate_h)
+
+    # Floppy disks (collectibles)
+    for f in world.floppies:
+        if f[2]:
+            continue
+        sx = f[0] - cx
+        if -6 <= sx < fb.w + 6:
+            fb.blit_sprite(FLOPPY, sx, f[1])
+
+    # Powerups (with a slight pulse so they catch the eye)
+    pulse = (time.time() * 4) % 2
+    for p in world.powerups:
+        if p[3]:
+            continue
+        sx = p[1] - cx
+        if -6 <= sx < fb.w + 6:
+            # bob up/down 1 px
+            bob = 0 if pulse < 1 else 1
+            fb.blit_sprite(POWERUP_RAPID, sx, p[2] - bob)
 
     # Enemies (back to front by world x). Cull off-screen.
     for e in sorted(world.enemies, key=lambda e: -e.x):
@@ -863,46 +1088,159 @@ def render_world(fb, world):
         # core ball (2x2)
         fb.fill_rect(spx, py, 2, 2, PAL['O'])
 
-    # HUD bar (top): score + lives only (title is on splash)
+    # HUD bar (top). Stat is left-aligned, RAPID timer right-aligned, so the
+    # two don't fight over the center of the bar.
     hud_h = 9
     fb.fill_rect(0, 0, fb.w, hud_h, (10, 16, 12))
-    if fb.w >= 110:
-        stat = f"KILLS {world.kills}/{TOTAL_ENEMIES}  LIVES {world.lives}"
+    now = time.time()
+    rapid_left = max(0.0, world.rapid_until - now)
+    rapid_text = f"RAPID {rapid_left:.0f}S" if rapid_left > 0 else ""
+    rapid_w = (len(rapid_text) * 6 - 1) if rapid_text else 0
+    # Reserve room on the right for RAPID + 4 px gap.
+    budget = fb.w - 4 - (rapid_w + 4 if rapid_text else 0)
+
+    full = (f"KILLS {world.kills}/{TOTAL_ENEMIES}  "
+            f"DISKS {world.disks}/{world.disks_total}  "
+            f"LIVES {world.lives}")
+    med  = (f"K {world.kills}/{TOTAL_ENEMIES}  "
+            f"D {world.disks}/{world.disks_total}  "
+            f"L {world.lives}")
+    short = (f"K{world.kills}/{TOTAL_ENEMIES} "
+             f"D{world.disks}/{world.disks_total} "
+             f"L{world.lives}")
+    if budget >= len(full) * 6 - 1:
+        stat = full
+    elif budget >= len(med) * 6 - 1:
+        stat = med
     else:
-        stat = f"K {world.kills}/{TOTAL_ENEMIES}  HP {world.lives}"
-    stat_w = len(stat) * 6 - 1
-    fb.blit_text(stat, max(2, (fb.w - stat_w) // 2), 1, PAL['C'])
+        stat = short
+    fb.blit_text(stat, 2, 1, PAL['C'])
+    if rapid_text:
+        fb.blit_text(rapid_text, fb.w - rapid_w - 2, 1, PAL['Y'])
 
     # taunt centered if active
-    if time.time() < world.message_until:
+    if now < world.message_until:
         msg = world.message.upper()
         msg_w = len(msg) * 6 - 1
         fb.blit_text(msg, max(2, (fb.w - msg_w) // 2), fb.h - 9, PAL['Y'])
 
     # end-state overlay
     if world.state in ("win", "lose"):
-        text = "YOU WIN!" if world.state == "win" else "YOU LOSE."
-        col = PAL['C'] if world.state == "win" else PAL['D']
-        bigw = len(text) * 12 - 1  # scale=2 (each glyph 10 wide + 2 spacing)
-        # render scaled font manually
-        x0 = max(2, (fb.w - bigw) // 2)
-        y0 = (fb.h // 2) - 8
-        # draw a dark plate behind it
-        fb.fill_rect(x0 - 4, y0 - 2, bigw + 8, 18, (0, 0, 0))
-        cx = x0
-        for ch in text.upper():
-            glyph = FONT.get(ch, FONT[" "])
-            for ry, row in enumerate(glyph):
-                for rx, c in enumerate(row):
-                    if c == "#":
-                        fb.fill_rect(cx + rx * 2, y0 + ry * 2, 2, 2, col)
-            cx += 5 * 2 + 2
-        sub = world.end_message.upper()
-        sub_w = len(sub) * 6 - 1
-        fb.blit_text(sub, max(2, (fb.w - sub_w) // 2), y0 + 18, PAL['Y'])
-        prompt = "Q TO QUIT"
-        pw = len(prompt) * 6 - 1
-        fb.blit_text(prompt, max(2, (fb.w - pw) // 2), y0 + 28, PAL['C'])
+        if world.state == "win":
+            _draw_certificate(fb, world)
+        else:
+            _draw_lose(fb, world)
+
+
+def _draw_lose(fb, world):
+    text = "YOU LOSE."
+    col = PAL['D']
+    bigw = len(text) * 12 - 1
+    x0 = max(2, (fb.w - bigw) // 2)
+    y0 = (fb.h // 2) - 8
+    fb.fill_rect(x0 - 4, y0 - 2, bigw + 8, 18, (0, 0, 0))
+    cx = x0
+    for ch in text.upper():
+        glyph = FONT.get(ch, FONT[" "])
+        for ry, row in enumerate(glyph):
+            for rx, c in enumerate(row):
+                if c == "#":
+                    fb.fill_rect(cx + rx * 2, y0 + ry * 2, 2, 2, col)
+        cx += 5 * 2 + 2
+    sub = world.end_message.upper()
+    sub_w = len(sub) * 6 - 1
+    fb.blit_text(sub, max(2, (fb.w - sub_w) // 2), y0 + 18, PAL['Y'])
+    prompt = "Q TO QUIT"
+    pw = len(prompt) * 6 - 1
+    fb.blit_text(prompt, max(2, (fb.w - pw) // 2), y0 + 28, PAL['C'])
+
+
+def _draw_certificate(fb, world):
+    """The goofy nerd-prize end screen: a fake terminal certificate.
+    Uses only FONT-supported chars (A-Z, 0-9, ! ' + , - . / : = ?).
+    Three size tiers, each verified to fit in its target framebuffer."""
+    border = (90, 200, 110)        # phosphor green
+    text_col = (210, 220, 230)
+    accent = PAL['Y']
+    k, t = world.kills, TOTAL_ENEMIES
+    d, dt = world.disks, world.disks_total
+    L = world.lives
+
+    if fb.w >= 160 and fb.h >= 100:
+        # Full: 7 lines, max 137 px wide, fits 160x100+
+        lines = [
+            ("= SUDO RM -RF 'EM ALL =",       border),
+            ("STATUS:    VANQUISHED",         text_col),
+            (f"GHOULS:    {k} / {t}",         text_col),
+            (f"DISKS:     {d} / {dt}",        text_col),
+            (f"LIVES:     {L}",               text_col),
+            ("LICENSE:   WTFPL",              text_col),
+            (".ANXIETY DELETED.",             accent),
+        ]
+    elif fb.w >= 110 and fb.h >= 72:
+        # Compact: 5 lines, max 101 px wide, fits 110x72+
+        lines = [
+            ("ROOT GRANTED!",                  border),
+            (f"GHOULS:  {k}/{t}",              text_col),
+            (f"DISKS:   {d}/{dt}",             text_col),
+            (f"LIVES:   {L}",                  text_col),
+            (".ANXIETY DELETED.",              accent),
+        ]
+    elif fb.h >= 60:
+        # Tiny: 3 lines, fits 80x60+
+        lines = [
+            ("ROOT WIN!",                              border),
+            (f"K {k}/{t} D {d}/{dt}",                  text_col),
+            (".ANXIETY DEAD.",                         accent),
+        ]
+    else:
+        # Sub-tiny: 2 lines, no plate — for fb.h < 60
+        lines = [
+            ("ROOT WIN!",                              border),
+            (f"K {k}/{t} D {d}/{dt}",                  accent),
+        ]
+
+    line_h = 9
+    pad = 4
+    text_w = max(len(l) for l, _ in lines) * 6 - 1
+    text_h = len(lines) * line_h
+
+    # If we don't have room for a plate + prompt, render plate-less so the
+    # text doesn't collide with the Q TO QUIT line.
+    use_plate = fb.h >= text_h + pad * 2 + 12 + 11
+
+    if use_plate:
+        plate_w = text_w + pad * 2
+        plate_h = text_h + pad * 2
+        plate_x = max(2, (fb.w - plate_w) // 2)
+        plate_y = max(11, (9 + (fb.h - 9 - plate_h - 12)) // 2)
+        plate_w = min(plate_w, fb.w - plate_x - 2)
+        plate_h = min(plate_h, fb.h - plate_y - 12)
+
+        fb.fill_rect(plate_x, plate_y, plate_w, plate_h, (8, 10, 16))
+        for x in range(plate_x, plate_x + plate_w):
+            fb.set(x, plate_y, border)
+            fb.set(x, plate_y + plate_h - 1, border)
+        for y in range(plate_y, plate_y + plate_h):
+            fb.set(plate_x, y, border)
+            fb.set(plate_x + plate_w - 1, y, border)
+        x0 = plate_x + pad
+        y0 = plate_y + pad
+        for i, (line, color) in enumerate(lines):
+            fb.blit_text(line, x0, y0 + i * line_h, color)
+        prompt_y = plate_y + plate_h + 3
+    else:
+        # No plate: just stack text vertically, leaving room for prompt.
+        y0 = max(11, (fb.h - text_h - 11) // 2)
+        for i, (line, color) in enumerate(lines):
+            x0 = max(2, (fb.w - len(line) * 6 + 1) // 2)
+            fb.blit_text(line, x0, y0 + i * line_h, color)
+        prompt_y = y0 + text_h + 2
+
+    prompt = "Q TO QUIT"
+    pw = len(prompt) * 6 - 1
+    fb.blit_text(prompt, max(2, (fb.w - pw) // 2),
+                 min(fb.h - 9, prompt_y), border)
 
 
 # ===================================================================

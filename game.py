@@ -116,14 +116,13 @@ LEVEL_THEMES = {
             'G': ( 85,  80,  78),
             'h': ( 60,  55,  52),
             'q': (170, 160, 140),
-            # 'phosphor terminal' ghouls -- they leak out of the screens.
-            # Keep them green for nerd theme even in the beige room.
-            'r': ( 30,  80,  20),
-            'd': ( 80, 200,  50),
-            'D': (140, 255,  80),
-            'V': (255, 255, 180),
-            'm': ( 10,  30,  10),
-            'i': ( 20,  60,  20),
+            # KAREN palette (level 3): jeans + pink sweater + blonde hair.
+            'r': ( 60,  75, 110),    # jeans navy
+            'd': (210, 110, 165),    # sweater pink mid
+            'D': (245, 175, 215),    # sweater pink light
+            'V': (250, 220, 130),    # blonde hair
+            'm': (180,  55,  80),    # red lipstick / frown
+            'i': ( 50,  30,  60),    # dark shoes
             # Office chair: brighter mesh-red so it actually pops against
             # the beige cubicle walls.
             'c': (220,  80,  80),    # mesh fabric (bright red)
@@ -364,6 +363,95 @@ ENEMY_B = [
     "ii........ii",
 ]
 
+# Level-2 enemy: rogue CPU. Square chip body with a metallic brand
+# stripe + pin pads. Same r/d/D/m/V palette so the level-2 cyan tint
+# applies automatically.
+CPU_A = [
+    "............",
+    "...rrrrrr...",
+    "..rrrrrrrr..",
+    "..rdddddddr.",
+    "..rdDDDDDdr.",
+    "..rdmmmmmdr.",
+    "..rdDDDDDdr.",
+    "..rddddddDr.",
+    "..rrrrrrrrr.",
+    "...........r",
+    ".r.r.r.r.r..",
+    "r..r..r..r..",
+    ".rr..rr..rr.",
+    ".rr..rr..rr.",
+    ".rr..rr..rr.",
+    ".ii..ii..ii.",
+]
+CPU_B = [
+    "............",
+    "...rrrrrr...",
+    "..rrrrrrrr..",
+    "..rdddddddr.",
+    "..rdDDDDDdr.",
+    "..rdmmmmmdr.",
+    "..rdDDDDDdr.",
+    "..rddddddDr.",
+    "..rrrrrrrrr.",
+    "r...........",
+    "..r.r.r.r.r.",
+    ".r..r..r..r.",
+    "rr..rr..rr..",
+    "rr..rr..rr..",
+    "rr..rr..rr..",
+    "ii..ii..ii..",
+]
+
+# Level-3 enemy: KAREN. Blonde bob, frowning face, sweater, jeans,
+# loafers. Hair uses 'V' (eye-yellow palette key, gets overridden to a
+# warm cream in the level-3 theme), face uses 's' (skin), body uses
+# the r/d/D/m/i ghoul palette like the others.
+KAREN_A = [
+    "............",
+    "...VVVVVV...",
+    "..VVVVVVVV..",
+    ".VVVssssVVV.",
+    ".VsmsssmssV.",
+    ".VsssssssV..",
+    ".VssMMMMssV.",
+    "..VsssssV...",
+    "..ddddddd...",
+    "..dDDDDDd...",
+    "..dDDDDDd...",
+    "..dDDDDDd...",
+    "..rr..rr....",
+    "..rr..rr....",
+    "..rr..rr....",
+    "..ii..ii....",
+]
+KAREN_B = [
+    "............",
+    "...VVVVVV...",
+    "..VVVVVVVV..",
+    ".VVVssssVVV.",
+    ".VsmsssmssV.",
+    ".VsssssssV..",
+    ".VssMMMMssV.",
+    "..VsssssV...",
+    "..ddddddd...",
+    "..dDDDDDd...",
+    "..dDDDDDd...",
+    "..dDDDDDd...",
+    "...rrrr.....",
+    "..rr..rr....",
+    "..rr..rr....",
+    "..ii..ii....",
+]
+
+# Per-level enemy frames. Spawn logic, collision, AI all stay the same;
+# only the rendered sprite changes.
+LEVEL_ENEMIES = {
+    1: (ENEMY_A, ENEMY_B),
+    2: (CPU_A, CPU_B),
+    3: (KAREN_A, KAREN_B),
+}
+
 # 10x9 crate decoration
 CRATE = [
     "cccccccccc",
@@ -397,15 +485,18 @@ SERVER_RACK = [
 # Designed for visibility at game scale: the silhouette pops against
 # the beige cubicle wall.
 OFFICE_CHAIR = [
-    "..XXXXXX..",
-    ".XCCccccX.",   # mesh fabric highlight on the upper back
-    ".XCCccccX.",
-    ".XCCcccCX.",
-    ".XCCCCCCX.",
-    "XCCCCCCCCX",   # shoulder/seat edge
-    "XccccccccX",   # seat cushion (lighter than the back)
+    "...XXXX...",   # top of the headrest
+    "..XCCCCX..",   # headrest narrowing into the back
+    ".XCccccCX.",   # backrest top (mesh fabric highlight)
+    ".XCccccCX.",
+    ".XCccccCX.",
+    ".XCccccCX.",
+    "XCCCCCCCCX",   # shoulders / lumbar
+    "XccccccccX",   # seat cushion (collision top)
+    "XccccccccX",   # under-seat
     "....XX....",   # gas-lift post
     "X..XXXX..X",   # 5-spoke wheel base
+    "..........",   # 1-px gap to the carpet
 ]
 
 # 5x6 floppy disk pickup
@@ -1246,7 +1337,18 @@ class World:
         # levels generated the exact same layout).
         rng = random.Random(0xC0FFEE ^ self.world_w ^ self.ground_y
                             ^ (self.level * 0x9E3779B1))
-        crate_w, crate_h = len(CRATE[0]), len(CRATE)  # 10 x 9
+        # Per-level obstacle dimensions. Level 3 uses 12-px-tall chairs
+        # (vs 9 for crates / racks) so the silhouette pops as something
+        # the player has to clear. Single-stack only on level 3 since
+        # 24-px (2 stacked chairs) sits right at max jump height.
+        crate_w = len(CRATE[0])
+        crate_h = len(CRATE)             # 9 -- collision unit for L1/L2
+        if self.level == 3:
+            obstacle_h = len(OFFICE_CHAIR)   # 12
+            obstacle_stack_choices = [1]
+        else:
+            obstacle_h = crate_h
+            obstacle_stack_choices = [1, 1, 1, 1, 2, 2]
         # Walk left-to-right placing one feature per step. Maintain a buffer of
         # "safe ground" before and after each gap so the player has takeoff +
         # landing room. Floppies sit either on the ground or on top of crates.
@@ -1258,8 +1360,8 @@ class World:
                 k=1,
             )[0]
             if kind == "crate":
-                stack = rng.choice([1, 1, 1, 1, 2, 2])
-                ow, oh = crate_w, stack * crate_h
+                stack = rng.choice(obstacle_stack_choices)
+                ow, oh = crate_w, stack * obstacle_h
                 self.obstacles.append((x, self.ground_y - oh, ow, oh))
                 # 50% chance: floppy on top of the crate
                 if rng.random() < 0.5:
@@ -1292,11 +1394,10 @@ class World:
         # roll skipped 'crate' enough times to produce zero, leaving the
         # level featureless. Force-place 2 single-stack obstacles at
         # 1/3 and 2/3 of the world if we ended up with fewer than 2.
-        crate_w, crate_h = len(CRATE[0]), len(CRATE)
         while len(self.obstacles) < 2:
             slot = self.world_w // 3 if len(self.obstacles) == 0 else (2 * self.world_w) // 3
             ox = self._nearest_safe_x(slot)
-            self.obstacles.append((ox, self.ground_y - crate_h, crate_w, crate_h))
+            self.obstacles.append((ox, self.ground_y - obstacle_h, crate_w, obstacle_h))
         # One RAPID powerup at the level's midpoint, lifted off the ground a
         # bit so it visually reads as a pickup instead of debris.
         rx = self.world_w // 2
@@ -1686,26 +1787,49 @@ class World:
                 continue
             new_x = e.x + e.vx * dt
             # Would the next position put the ghoul inside an obstacle?
-            blocked = False
+            hit_obs = None
             for ox, oy, ow, oh in self.obstacles:
-                # Use a tight bbox around the ghoul for the collision check
                 if (new_x + 1 < ox + ow and new_x + ENEMY_W - 1 > ox
                         and e.y + 1 < oy + oh and e.y + ENEMY_H > oy):
-                    blocked = True
+                    hit_obs = (ox, oy, ow, oh)
                     break
-            # About to walk off into a gap? Sample the ground at the leading
-            # foot's x position. Also reverse at world boundaries so they
-            # don't escape sideways.
-            if not blocked:
+            blocked_other = False
+            if hit_obs is None:
                 lead_x = new_x + (ENEMY_W if e.vx > 0 else 0)
                 if self._in_gap(int(lead_x)):
-                    blocked = True
+                    blocked_other = True
                 elif lead_x <= -8 or lead_x >= self.world_w + 8:
-                    blocked = True
-            if blocked:
-                e.vx = -e.vx       # turn around, keep shambling
+                    blocked_other = True
+            if hit_obs is not None:
+                # Snap the ghoul flush against the side of the obstacle so it
+                # never ends up overlapping (which used to leave it stuck,
+                # reversing every frame between two 'inside-obstacle' states).
+                ox, oy, ow, oh = hit_obs
+                if e.vx > 0:
+                    e.x = float(ox - ENEMY_W + 1)
+                else:
+                    e.x = float(ox + ow - 1)
+                e.vx = -e.vx
+            elif blocked_other:
+                e.vx = -e.vx
             else:
                 e.x = new_x
+            # Even after snap+reverse, double-check we aren't sitting inside
+            # an obstacle (e.g. spawned-into one or flipped into a different
+            # crate). If so, push laterally until clear.
+            for _ in range(3):
+                inside = None
+                for ox, oy, ow, oh in self.obstacles:
+                    if (e.x + 1 < ox + ow and e.x + ENEMY_W - 1 > ox
+                            and e.y + 1 < oy + oh and e.y + ENEMY_H > oy):
+                        inside = (ox, oy, ow, oh)
+                        break
+                if inside is None:
+                    break
+                ox, oy, ow, oh = inside
+                # push out away from the player so the ghoul retreats rather
+                # than charges through a crate
+                e.x = float(ox - ENEMY_W + 1) if self.player_x > ox else float(ox + ow - 1)
             e.anim_t += dt
             # collide with pellets (bounding box: enemy ~ 12x16 at e.x..e.x+11)
             for p in self.pellets:
@@ -2006,14 +2130,16 @@ def render_world(fb, world):
             else:
                 fb.surface.blit(surf, (sx, int(b.y)))
 
-    # Enemies (back to front by world x). Cull off-screen.
+    # Enemies (back to front by world x). Sprite varies by level:
+    # ghouls (L1), CPUs (L2), Karens (L3). Same r/d/D/V/m/i palette so
+    # the level theme's enemy color overrides apply to all three.
+    enemy_a, enemy_b = LEVEL_ENEMIES.get(world.level, (ENEMY_A, ENEMY_B))
     for e in sorted(world.enemies, key=lambda e: -e.x):
         if not e.alive:
             continue
         sx = int(e.x) - cx
         if -16 <= sx < fb.w + 16:
-            frame = ENEMY_A if int(e.anim_t * 6) % 2 == 0 else ENEMY_B
-            # Sprites are drawn facing right by default; flip when walking left
+            frame = enemy_a if int(e.anim_t * 6) % 2 == 0 else enemy_b
             fb.blit_sprite(frame, sx, int(e.y), flip=(e.vx < 0))
 
     # Player

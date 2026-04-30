@@ -154,23 +154,23 @@ KILL_TAUNTS = [
 
 # Pancakes mode taunts. The ghouls are gone; what remains are little
 # black-and-white memorial Frenchies you say hello to. In honor of
-# Pancake Waffles -- a very good boy.
+# Pancake Waffles -- a very good girl.
 PANCAKES_TAUNTS = [
     "Pancakes loves you.",
     "A wag for the road.",
     "Pancake Waffles approves.",
     "Boop! Right on the snoot.",
-    "He says hi, friend.",
-    "Forever a good boy.",
+    "She says hi, friend.",
+    "Forever a good girl.",
     "All the head pats.",
     "Snuggle delivered.",
     "Bork: 'I love you.'",
-    "He's so proud of you.",
+    "She's so proud of you.",
     "Tail wags from beyond.",
     "You earned a slobbery kiss.",
     "Treat received with love.",
     "Belly rub achievement.",
-    "Best buddy, always.",
+    "Best girl, always.",
 ]
 
 WIN_QUOTES = [

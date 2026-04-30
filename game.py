@@ -24,29 +24,29 @@ import wave
 # ===================================================================
 # Tuning
 # ===================================================================
-TARGET_FPS         = 30
-FRAME_DT           = 1.0 / TARGET_FPS
+TARGET_FPS         = 60        # bumped from 30 -- doubles input poll rate, halves
+FRAME_DT           = 1.0 / TARGET_FPS  # input latency, smooths motion.
 PLAYER_MIN_X       = 6
-PLAYER_SPEED       = 1.4       # px / tick (per discrete key event)
-PLAYER_PX_PER_SEC  = 42.0      # continuous walk speed while a direction is held
-MOVE_HOLD_S        = 0.30      # how long a key-press counts as "still held" so we
-                               # bridge the OS pre-repeat delay (~250-500ms on macOS)
-WORLD_SCREENS      = 3         # total world width in screen-widths
-CAMERA_DEAD_LO     = 0.35      # camera scrolls left if player < this fraction of fb_w
-CAMERA_DEAD_HI     = 0.55      # camera scrolls right if player > this fraction of fb_w
-PELLET_SPEED       = 3.4       # px / tick (straight shot, no gravity)
-PELLET_COOLDOWN    = 0.18      # seconds between shots
-JUMP_V0            = 2.1       # initial upward velocity (px / tick)
-GRAVITY            = 0.11      # downward accel (px / tick^2)
-                               # max jump height = JUMP_V0^2 / (2*GRAVITY) ~= 20 px
-                               # so a 2-stack crate (18 px) is just clearable.
-ENEMY_SPEED_MIN    = 0.30
-ENEMY_SPEED_MAX    = 0.65
-ENEMY_SPAWN_MIN    = 0.9
-ENEMY_SPAWN_MAX    = 2.0
-TOTAL_ENEMIES      = 8
-PLAYER_LIVES       = 3
-HIT_COOLDOWN       = 0.8
+# All physics are now expressed in real-time (px/sec, px/sec^2). Per-tick
+# values get derived in tick() via dt so physics is identical at any FPS.
+PLAYER_PX_PER_SEC      = 95.0   # walk speed -- ~2x snappier than the v0.5 42.
+MOVE_HOLD_S            = 0.45   # extends a single keypress this long so we walk
+                                # through the OS auto-repeat pre-delay (250-500ms).
+WORLD_SCREENS          = 3
+CAMERA_DEAD_LO         = 0.35
+CAMERA_DEAD_HI         = 0.55
+PELLET_PX_PER_SEC      = 160.0  # ~50% snappier than before.
+PELLET_COOLDOWN        = 0.18   # seconds between shots
+JUMP_V0_PX_PER_SEC     = 150.0  # initial jump velocity. With GRAVITY below,
+GRAVITY_PX_PER_SEC2    = 460.0  # peak jump = v0^2 / (2g) ~ 24 px (clears a
+                                # 2-stack crate, 18 px, with comfortable margin).
+ENEMY_PX_PER_SEC_MIN   = 14.0   # ghoul shamble speed. 14 = leisurely, 28 = brisk.
+ENEMY_PX_PER_SEC_MAX   = 28.0
+ENEMY_SPAWN_MIN        = 0.9
+ENEMY_SPAWN_MAX        = 2.0
+TOTAL_ENEMIES          = 8
+PLAYER_LIVES           = 3
+HIT_COOLDOWN           = 0.8
 
 # ===================================================================
 # Flavor text (some carried over)
@@ -549,11 +549,13 @@ class Pellet:
 
 
 class Enemy:
-    __slots__ = ("x", "y", "speed", "hp", "alive", "anim_t")
-    def __init__(self, x, y, speed):
+    """A red ghoul. Moves at vx px/sec (signed -> direction). Reverses
+    direction when it would step into a crate or fall into a gap."""
+    __slots__ = ("x", "y", "vx", "hp", "alive", "anim_t")
+    def __init__(self, x, y, vx):
         self.x = x
         self.y = y
-        self.speed = speed
+        self.vx = vx        # px/sec; negative = walking left, positive = right
         self.hp = 1
         self.alive = True
         self.anim_t = 0.0
@@ -776,7 +778,8 @@ class World:
         # pellet emerges from slingshot tip ~ right side of nerd, mid-height
         sling_x = self.player_x + (12 if self.player_face_right else 1)
         sling_y = self.player_y + 12
-        vx = PELLET_SPEED if self.player_face_right else -PELLET_SPEED
+        # vx is in px/sec; pellet update integrates with dt
+        vx = PELLET_PX_PER_SEC if self.player_face_right else -PELLET_PX_PER_SEC
         self.pellets.append(Pellet(sling_x, sling_y, vx))
         play("shoot")
 
@@ -843,7 +846,7 @@ class World:
                 # SPACE = jump (NES/SNES platformer convention).
                 # UP is reserved for future ladder/vertical movement.
                 if self.player_grounded:
-                    self.player_vy = -JUMP_V0
+                    self.player_vy = -JUMP_V0_PX_PER_SEC  # px/sec, integrated below
                     self.player_grounded = False
                     # Capture jump direction from recent press history. The OS
                     # auto-repeat pre-delay (~250-500ms) can leave a gap where
@@ -891,13 +894,17 @@ class World:
 
         # ---- vertical motion (jump / fall / land on platforms) ----
         if not self.player_grounded:
-            self.player_vy += GRAVITY
-            new_y = self.player_y + self.player_vy
+            # vy is in px/sec; gravity in px/sec^2. Both integrated with dt
+            # so physics is identical at any FPS.
+            self.player_vy += GRAVITY_PX_PER_SEC2 * dt
+            new_y = self.player_y + self.player_vy * dt
             if self.player_vy > 0:  # falling: try to land on the highest surface
                 old_feet = self.player_y + len(NERD)
                 new_feet = new_y + len(NERD)
                 floor = self._floor_top_at(self.player_x)
-                if new_feet >= floor and old_feet <= floor + 1:
+                # Allow crossing several pixels of floor in a single frame so
+                # we still catch the surface when vy*dt is large.
+                if new_feet >= floor and old_feet <= floor + 4:
                     self.player_y = floor - len(NERD)
                     self.player_vy = 0.0
                     self.player_grounded = True
@@ -936,15 +943,24 @@ class World:
             self.camera_x = self.player_x - self.fb_w * CAMERA_DEAD_LO
         self.camera_x = max(0.0, min(float(self.world_w - self.fb_w), self.camera_x))
 
-        # ---- spawn enemies just past the right edge of the camera ----
+        # ---- spawn enemies, half from in front (right of camera), half from
+        # behind (left of camera). Each enemy walks toward the player. ----
         now = time.time()
         if (self.spawned < TOTAL_ENEMIES
                 and now >= self.next_spawn
                 and len([e for e in self.enemies if e.alive]) < 4):
-            speed = random.uniform(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX)
-            ex = self.camera_x + self.fb_w + 4
+            speed_mag = random.uniform(ENEMY_PX_PER_SEC_MIN, ENEMY_PX_PER_SEC_MAX)
+            from_behind = random.random() < 0.5
+            if from_behind and self.camera_x > 24:
+                # spawn left of the camera, walking RIGHT toward the player
+                ex = self.camera_x - 16
+                vx = speed_mag
+            else:
+                # spawn right of the camera, walking LEFT toward the player
+                ex = self.camera_x + self.fb_w + 4
+                vx = -speed_mag
             ey = self.ground_y - len(ENEMY_A)
-            self.enemies.append(Enemy(ex, ey, speed))
+            self.enemies.append(Enemy(ex, ey, vx))
             self.spawned += 1
             self.next_spawn = now + random.uniform(ENEMY_SPAWN_MIN, ENEMY_SPAWN_MAX)
 
@@ -952,7 +968,7 @@ class World:
         for p in self.pellets:
             if not p.alive:
                 continue
-            p.x += p.vx
+            p.x += p.vx * dt
             # crate absorption
             for ox, oy, ow, oh in self.obstacles:
                 if ox <= p.x <= ox + ow and oy <= p.y <= oy + oh:
@@ -963,11 +979,35 @@ class World:
                 p.alive = False
         self.pellets = [p for p in self.pellets if p.alive]
 
-        # enemies
+        # ---- enemies. They block on crates and pits; they reverse direction
+        # when they would step into one. ----
+        ENEMY_W = len(ENEMY_A[0])  # 12
+        ENEMY_H = len(ENEMY_A)     # 16
         for e in self.enemies:
             if not e.alive:
                 continue
-            e.x -= e.speed
+            new_x = e.x + e.vx * dt
+            # Would the next position put the ghoul inside an obstacle?
+            blocked = False
+            for ox, oy, ow, oh in self.obstacles:
+                # Use a tight bbox around the ghoul for the collision check
+                if (new_x + 1 < ox + ow and new_x + ENEMY_W - 1 > ox
+                        and e.y + 1 < oy + oh and e.y + ENEMY_H > oy):
+                    blocked = True
+                    break
+            # About to walk off into a gap? Sample the ground at the leading
+            # foot's x position. Also reverse at world boundaries so they
+            # don't escape sideways.
+            if not blocked:
+                lead_x = new_x + (ENEMY_W if e.vx > 0 else 0)
+                if self._in_gap(int(lead_x)):
+                    blocked = True
+                elif lead_x <= -8 or lead_x >= self.world_w + 8:
+                    blocked = True
+            if blocked:
+                e.vx = -e.vx       # turn around, keep shambling
+            else:
+                e.x = new_x
             e.anim_t += dt
             # collide with pellets (bounding box: enemy ~ 12x16 at e.x..e.x+11)
             for p in self.pellets:
@@ -1097,7 +1137,8 @@ def render_world(fb, world):
         sx = int(e.x) - cx
         if -16 <= sx < fb.w + 16:
             frame = ENEMY_A if int(e.anim_t * 6) % 2 == 0 else ENEMY_B
-            fb.blit_sprite(frame, sx, int(e.y), flip=True)
+            # Sprites are drawn facing right by default; flip when walking left
+            fb.blit_sprite(frame, sx, int(e.y), flip=(e.vx < 0))
 
     # Player
     psx = int(world.player_x) - cx
@@ -1417,15 +1458,18 @@ def get_keys():
             break
         data += chunk
 
+    # If the read ended mid-escape-sequence, give the OS a tiny window to
+    # deliver the rest. 5 ms is plenty -- the entire CSI is normally one
+    # write -- and keeps input latency low at 60 fps.
     if data.endswith(b"\x1b"):
-        r, _, _ = select.select([fd], [], [], 0.03)
+        r, _, _ = select.select([fd], [], [], 0.005)
         if r:
             try:
                 data += os.read(fd, 8)
             except (BlockingIOError, OSError):
                 pass
     if len(data) >= 2 and data[-2] == 0x1b and data[-1] in (0x5b, 0x4f):
-        r, _, _ = select.select([fd], [], [], 0.03)
+        r, _, _ = select.select([fd], [], [], 0.005)
         if r:
             try:
                 data += os.read(fd, 8)

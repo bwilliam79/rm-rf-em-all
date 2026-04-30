@@ -21,13 +21,13 @@ prompt also blinks; this is a static snapshot.)*
 
 ### In-game
 
-Side-scrolling pixel diorama: lab-coat nerd mid-jump over a pit, RAPID
-powerup glowing on the ground, floppy-disk pickups scattered around,
-torchlit brick corridor, slingshot pellet mid-flight, ghoul on the
-right. The world is several screens wide and the camera follows the
-player.
+Side-scrolling pixel diorama: lab-coat nerd mid-jump over a pit,
+ghouls closing in from **both sides**, RAPID powerup glowing on the
+ground, floppy-disk pickups scattered around, torchlit brick corridor,
+slingshot pellet mid-flight. The world is several screens wide and the
+camera follows the player.
 
-![in-game: lab-coat nerd mid-jump over a pit with floppies, a RAPID powerup, and a ghoul](docs/ingame.png)
+![in-game: lab-coat nerd mid-jump over a pit between two ghouls coming from both sides](docs/ingame.png)
 
 *(Same source: real framebuffer output, 4x nearest-neighbor upscale.
 The actual game renders this scene live in your terminal using
@@ -96,6 +96,17 @@ rm -rf em-all
 (It is literally in the name.)
 
 ## Status
+
+**v0.6** -- snappier controls, smarter ghouls. Bumped target FPS from
+30 to 60 so input poll rate doubles and motion smooths out, refactored
+all physics to be framerate-independent (use `dt` instead of per-tick
+constants), increased walk speed by ~2x and jump arc clears 2-stack
+crates with comfortable margin. Tightened the ESC-sequence wait in the
+input reader from 30 ms to 5 ms, cutting per-frame input latency.
+Ghouls now **block on crates and pits** -- they reverse direction
+instead of walking through cover or falling into the abyss -- and can
+**spawn from either side** of the camera so you have to actually
+watch your back. Sprites flip to face the direction they're walking.
 
 **v0.5** -- the level actually feels like a level. Added **pits** in
 the floor (fall in, lose a life, respawn at the last safe ground tile),

@@ -183,6 +183,12 @@ SFX_SPECS = {
 }
 _SFX_CACHE = {}        # name -> pygame.mixer.Sound
 _MUSIC_PATH = None     # path to the theme WAV (set in init_audio)
+_MIXER_OK = False      # True only after a successful pygame.mixer.init().
+                       # On systems where pygame was built without SDL2_mixer
+                       # (e.g. Linux + Python 3.14 source-built wheel), the
+                       # whole pygame.mixer module is missing and any access
+                       # raises NotImplementedError. All audio code paths
+                       # check this flag first and silently no-op when False.
 
 # ===================================================================
 # Palette - single-char-per-pixel keys for sprite strings
@@ -2356,6 +2362,8 @@ def _draw_certificate(fb, world):
 # ===================================================================
 def play(name):
     """Play a one-shot SFX. Silently no-ops if audio init failed."""
+    if not _MIXER_OK:
+        return
     snd = _SFX_CACHE.get(name)
     if snd is not None:
         try:
@@ -2441,13 +2449,25 @@ def _generate_sfx_wav(spec, path):
 
 def init_audio():
     """Initialize pygame.mixer, generate the theme + SFX (cached on disk)
-    and load them into pygame.mixer.Sound objects. Idempotent."""
-    global _MUSIC_PATH
+    and load them into pygame.mixer.Sound objects. Idempotent.
+
+    On systems where pygame was built without SDL2_mixer support (e.g. on
+    Linux when SDL2_mixer-devel wasn't installed at compile time), the
+    whole pygame.mixer attribute raises NotImplementedError on access.
+    We catch broadly here so the game still runs silently in that case
+    instead of crashing on startup."""
+    global _MUSIC_PATH, _MIXER_OK
     try:
         pygame.mixer.pre_init(frequency=22050, size=-16, channels=1, buffer=512)
         pygame.mixer.init()
-    except pygame.error:
-        return  # no audio device; silent fallback
+        _MIXER_OK = True
+    except (pygame.error, NotImplementedError, AttributeError, ImportError):
+        sys.stderr.write(
+            "rm-rf-em-all: pygame.mixer unavailable -- running silent.\n"
+            "  (Install SDL2_mixer dev headers and 'pip install --force-reinstall\n"
+            "   --no-binary :all: pygame' to get sound back.)\n"
+        )
+        return
     tmp = tempfile.gettempdir()
     # Theme
     _MUSIC_PATH = os.path.join(tmp, "rm_rf_em_all_theme_v2.wav")
@@ -2533,20 +2553,22 @@ def generate_theme(path):
 
 def start_music():
     """Loop the theme via pygame.mixer.music."""
-    if _MUSIC_PATH is None:
+    if not _MIXER_OK or _MUSIC_PATH is None:
         return
     try:
         pygame.mixer.music.load(_MUSIC_PATH)
         pygame.mixer.music.set_volume(0.45)
         pygame.mixer.music.play(loops=-1)
-    except pygame.error:
+    except (pygame.error, NotImplementedError, AttributeError):
         pass
 
 
 def stop_music():
+    if not _MIXER_OK:
+        return
     try:
         pygame.mixer.music.stop()
-    except pygame.error:
+    except (pygame.error, NotImplementedError, AttributeError):
         pass
 
 

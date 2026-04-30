@@ -29,8 +29,8 @@ FRAME_DT           = 1.0 / TARGET_FPS  # input latency, smooths motion.
 PLAYER_MIN_X       = 6
 # All physics are now expressed in real-time (px/sec, px/sec^2). Per-tick
 # values get derived in tick() via dt so physics is identical at any FPS.
-PLAYER_PX_PER_SEC      = 95.0   # walk speed -- ~2x snappier than the v0.5 42.
-MOVE_HOLD_S            = 0.45   # extends a single keypress this long so we walk
+PLAYER_PX_PER_SEC      = 70.0   # walk speed (px/sec)
+MOVE_HOLD_S            = 0.40   # extends a single keypress this long so we walk
                                 # through the OS auto-repeat pre-delay (250-500ms).
 WORLD_SCREENS          = 3
 CAMERA_DEAD_LO         = 0.35
@@ -833,6 +833,23 @@ class World:
         # input. LEFT/RIGHT also extend a "hold window" so movement is
         # continuous while held, even during the OS auto-repeat pre-delay.
         now_t = time.time()
+
+        def _carry_walk_through_action():
+            """In cbreak mode macOS only auto-repeats the most recently
+            held key. So while the player is mashing X to shoot or SPACE
+            to jump, the LEFT/RIGHT auto-repeat is suspended and the hold
+            window expires. If we saw a direction press in the last 0.5 s,
+            re-arm the hold for whichever side was pressed most recently
+            so movement keeps going through the action."""
+            if (now_t - max(self.last_press_left, self.last_press_right)) >= 0.5:
+                return
+            if self.last_press_right >= self.last_press_left:
+                self.hold_right_until = max(self.hold_right_until,
+                                            now_t + MOVE_HOLD_S)
+            else:
+                self.hold_left_until = max(self.hold_left_until,
+                                           now_t + MOVE_HOLD_S)
+
         for k in keys:
             if k == "LEFT":
                 self.hold_left_until = now_t + MOVE_HOLD_S
@@ -862,9 +879,11 @@ class World:
                         self.air_dir = +1
                     else:
                         self.air_dir = 0
+                _carry_walk_through_action()
             elif k in ("x", "X"):
                 # X = shoot (Mega Man / NES B-button convention).
                 self.shoot()
+                _carry_walk_through_action()
 
         # ---- horizontal motion with obstacle collision ----
         step = PLAYER_PX_PER_SEC * dt

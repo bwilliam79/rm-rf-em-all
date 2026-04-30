@@ -59,6 +59,70 @@ ENEMY_SPAWN_MAX        = 2.0
 TOTAL_ENEMIES          = 8
 PLAYER_LIVES           = 3
 HIT_COOLDOWN           = 0.8
+FINAL_LEVEL            = 3   # win the game by clearing this level
+
+# ===================================================================
+# Level themes. Each entry overrides PAL keys to recolor the world
+# without redrawing every sprite. Sprites that read 'r/d/D' (ghouls)
+# get a tint applied at render time so they match the level palette.
+# ===================================================================
+LEVEL_THEMES = {
+    1: {
+        "name": "BRICK CORRIDOR",
+        "pal": {},   # default palette
+        "ghoul_tint": None,
+        "boss_tint": (160, 90, 220, 255),  # purple boss in level 1
+    },
+    2: {
+        "name": "SERVER ROOM",
+        "pal": {
+            'k': ( 5,  10,  18),
+            'K': (10,  20,  35),
+            'B': (20,  45,  72),
+            'j': (28,  46,  64),     # wall mid (cool blue-grey)
+            'J': (50,  78, 100),
+            'u': (12,  24,  38),
+            'g': (60,  78,  96),     # floor lit
+            'G': (40,  60,  78),
+            'h': (20,  35,  50),
+            'q': (110, 160, 200),
+            # 404-error ghouls: cyan
+            'r': ( 25,  70, 110),
+            'd': ( 60, 150, 220),
+            'D': (110, 210, 255),
+            'V': (255, 240, 100),
+            'm': ( 10,  30,  50),
+            'i': ( 16,  50,  80),
+        },
+        "boss_tint": (90, 160, 255, 255),
+    },
+    3: {
+        "name": "DEEP TERMINAL",
+        "pal": {
+            'k': ( 0,   8,   2),
+            'K': ( 0,  16,   4),
+            'B': ( 0,  28,   8),
+            'j': (12,  30,  12),
+            'J': (40,  80,  30),
+            'u': ( 5,  16,   5),
+            'g': (25,  60,  20),
+            'G': (10,  35,  10),
+            'h': ( 0,  18,   0),
+            'q': (110, 220,  90),
+            # phosphor ghouls
+            'r': ( 30,  80,  20),
+            'd': ( 80, 200,  50),
+            'D': (140, 255,  80),
+            'V': (255, 255, 180),
+            'm': ( 10,  30,  10),
+            'i': ( 20,  60,  20),
+        },
+        "boss_tint": (200, 255,  60, 255),
+    },
+}
+# Snapshot of the level-1 (i.e. defaults) PAL values so we can restore
+# them when transitioning back to level 1 or applying a partial override.
+_PAL_DEFAULTS = None
 
 # ===================================================================
 # Flavor text (some carried over)
@@ -95,14 +159,15 @@ DEATH_QUOTES = [
 # ===================================================================
 SFX_SPECS = {
     # name -> (frequencies in Hz, duration_s, mode)
-    # mode 'down': linear pitch glide from f0 to f1
-    # mode 'noise': band-limited noise
     "shoot": ((900.0, 1400.0), 0.05, "down"),
     "kill":  ((220.0, 80.0),   0.18, "noise"),
     "hit":   ((140.0, 70.0),   0.18, "down"),
     "win":   ((392.0, 523.0),  0.50, "arp"),
     "lose":  ((196.0, 110.0),  0.55, "down"),
     "miss":  ((1200.0, 1700.0), 0.04, "down"),
+    # Looping drone propeller buzz: square-wave carrier with a gentle
+    # 25 Hz amplitude modulation that reads as 'rotor blades passing'.
+    "drone": ((230.0, 230.0),  0.50, "buzz"),
 }
 _SFX_CACHE = {}        # name -> pygame.mixer.Sound
 _MUSIC_PATH = None     # path to the theme WAV (set in init_audio)
@@ -192,6 +257,12 @@ PAL = {
     # boss (overlord) -- only the HP-bar accent is needed since the
     # sprite itself is a runtime-tinted ENEMY surface (see _get_overlord_surface).
     'I': (220,  90, 200),        # phosphor pink (boss HP bar)
+
+    # SSL cert (golden padlock that drops when the boss dies)
+    'e': (255, 215,  60),        # gold body
+    'v': (200, 165,  20),        # gold shadow
+    'S': (255, 240, 160),        # bright gold highlight
+    'U': (110,  80,  10),        # dark gold outline
 }
 
 # ===================================================================
@@ -316,13 +387,48 @@ DRONE_B = [
     ".QQ......QQ.",
 ]
 
-# 5x5 weapon crate (color is set in render based on kind)
-WEAPON_CRATE = [
-    "ccccc",
-    "cYYYc",
-    "cYlYc",
-    "cYYYc",
-    "ccccc",
+# Three 7x6 weapon crates: each visually hints at the weapon's effect.
+# RAPID = stacked motion lines (bullet hose). SPREAD = three radiating
+# rays from a central source. PIERCE = horizontal arrow/lance.
+WEAPON_CRATE_RAPID = [    # yellow box, lightning-style stripes
+    "cccccccc"[:7],
+    "cYYYYYYc"[:7],
+    "cZZZZZZc"[:7],
+    "cYYYYYYc"[:7],
+    "cZZZZZZc"[:7],
+    "cccccccc"[:7],
+]
+WEAPON_CRATE_SPREAD = [   # cyan-ish box, three rays converging from left
+    "ccccccc",
+    "cd...lc",
+    "c.dl..c",
+    "c.lDd.c",
+    "cd..dlc",
+    "ccccccc",
+]
+WEAPON_CRATE_PIERCE = [   # red box, horizontal arrow inside
+    "ccccccc",
+    "cXXXXXc",
+    "c.D...c",
+    "cDDDDDc",
+    "c.D...c",
+    "cccccXc"[:7],
+]
+# Backwards-compat: old name still referenced by some code paths
+WEAPON_CRATE = WEAPON_CRATE_RAPID
+
+# 7x9 SSL cert: a golden padlock with a tiny "SSL" plate. Drops when
+# the boss dies and ends the level when the player walks over it.
+SSL_CERT = [
+    ".UUUUU.",   # padlock shackle top
+    ".U...U.",
+    ".U...U.",
+    "UUeeeUU",   # body top
+    "UeeSeeU",
+    "UeeSeeU",
+    "UeevveU",
+    "UeevveU",
+    "UUUUUUU",
 ]
 
 # Boss "OVERLORD" sprite is built at runtime by scaling ENEMY_A/B 2x and
@@ -409,13 +515,14 @@ class Framebuffer:
     / blit_text / blit_text_scaled). Drawing happens at the internal
     resolution; main() scales the surface to the window once per frame.
     """
-    __slots__ = ("w", "h", "surface", "_sprite_cache")
+    __slots__ = ("w", "h", "surface", "_sprite_cache", "_cache_version")
 
     def __init__(self, w, h):
         self.w = w
         self.h = h
         self.surface = pygame.Surface((w, h))
         self._sprite_cache = {}  # id(sprite_rows) -> (right_facing, left_facing)
+        self._cache_version = _SPRITE_CACHE_VERSION
 
     def clear(self, color):
         self.surface.fill(color)
@@ -431,6 +538,10 @@ class Framebuffer:
         self.surface.fill(color, (int(x), int(y), int(w), int(h)))
 
     def blit_sprite(self, sprite_rows, x0, y0, palette=PAL, flip=False):
+        # Invalidate the cache when the global palette changes (level transition)
+        if self._cache_version != _SPRITE_CACHE_VERSION:
+            self._sprite_cache.clear()
+            self._cache_version = _SPRITE_CACHE_VERSION
         key = id(sprite_rows)
         cached = self._sprite_cache.get(key)
         if cached is None:
@@ -485,6 +596,28 @@ def _make_sprite_surface(sprite_rows, palette=PAL, flip=False):
             if color is not None:
                 surf.set_at((x, y), color)
     return surf
+
+
+# Bumped on level transition so cached sprite surfaces (which capture the
+# palette at build time) get invalidated and rebuilt with the new colors.
+_SPRITE_CACHE_VERSION = 0
+
+
+def _apply_level_palette(level):
+    """Mutate PAL in-place to apply the level's theme overrides. The first
+    time this is called we snapshot the defaults so we can restore them."""
+    global _PAL_DEFAULTS
+    if _PAL_DEFAULTS is None:
+        _PAL_DEFAULTS = dict(PAL)
+    # Reset to defaults, then overlay the level's overrides.
+    PAL.clear()
+    PAL.update(_PAL_DEFAULTS)
+    overrides = LEVEL_THEMES.get(level, LEVEL_THEMES[1])["pal"]
+    PAL.update(overrides)
+    # Boss tint comes from the theme too; updated globally so render uses it.
+    global BOSS_TINT
+    BOSS_TINT = LEVEL_THEMES.get(level, LEVEL_THEMES[1])["boss_tint"]
+    _OVERLORD_CACHE.clear()
 
 
 _OVERLORD_CACHE = {}   # ('A'|'B', flip) -> pygame.Surface
@@ -680,6 +813,16 @@ class WeaponCrate:
         self.claimed = False
 
 
+class SSLCert:
+    """A golden 7x9 padlock that drops when the boss dies. Walking over
+    it advances the level (or wins the game on the final level)."""
+    __slots__ = ("x", "y", "claimed")
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.claimed = False
+
+
 class World:
     # NERD sprite is 18x20 but the visible body is roughly cols 2-14, rows 4-19.
     # Use a tighter bbox for collisions so hair etc. doesn't trigger them.
@@ -718,11 +861,18 @@ class World:
         self.weapon_until = 0.0
         # delivery drones currently flying through the level
         self.drones = []
+        # Mixer channel currently looping the drone buzz (None when no drones)
+        self._drone_channel = None
         # weapon crates that have been dropped and are on the ground waiting
         self.weapon_crates = []
         # the boss (None until triggered, then a single Boss instance)
         self.boss = None
         self.boss_announced = False
+        # the golden SSL cert that drops when the boss dies; walking over it
+        # advances the level (or wins on the final level)
+        self.ssl_cert = None
+        # current level (1..FINAL_LEVEL). Persists across level transitions.
+        self.level = 1
         # disks collected count (total floppies set by _gen_level)
         self.disks = 0
         self.disks_total = 0
@@ -949,6 +1099,43 @@ class World:
         y = 6.0   # high in the sky, above the wall_top
         self.drones.append(Drone(x, y, vx, target_x, kind))
 
+    def _advance_level(self):
+        """SSL cert claimed -> next level, or final win if we just cleared
+        FINAL_LEVEL. Player progress (lives, disks, weapon timer) carries
+        over; kills, enemies, drones, crates, boss, ssl_cert all reset."""
+        if self.level >= FINAL_LEVEL:
+            self.state = "win"
+            self.end_message = random.choice(WIN_QUOTES)
+            play("win")
+            return
+        self.level += 1
+        # Apply the new theme's PAL overrides and clear sprite caches so
+        # cached enemy/crate/etc. surfaces get rebuilt with new colors.
+        _apply_level_palette(self.level)
+        global _SPRITE_CACHE_VERSION
+        _SPRITE_CACHE_VERSION += 1
+        # Reset world state for a fresh playfield
+        self.kills = 0
+        self.spawned = 0
+        self.next_spawn = time.time() + random.uniform(ENEMY_SPAWN_MIN, ENEMY_SPAWN_MAX)
+        self.enemies = []
+        self.pellets = []
+        self.drones = []
+        self.weapon_crates = []
+        self.boss = None
+        self.boss_announced = False
+        self.ssl_cert = None
+        self.player_x = float(PLAYER_MIN_X + 4)
+        self.player_y = self.ground_y - len(NERD)
+        self.player_vy = 0.0
+        self.player_grounded = True
+        self.camera_x = 0.0
+        self.last_safe_x = float(PLAYER_MIN_X + 4)
+        self._gen_level()
+        self.message = f"LEVEL {self.level}: {LEVEL_THEMES[self.level]['name']}"
+        self.message_until = time.time() + 2.5
+        play("win")    # cheerful arpeggio for level transition
+
     def _grant_weapon(self, kind, duration=8.0):
         self.weapon_kind = kind
         self.weapon_until = time.time() + duration
@@ -978,14 +1165,21 @@ class World:
                 p[3] = True
                 if p[0] == "RAPID":
                     self._grant_weapon("RAPID")
-        # Drone-delivered weapon crates: 5x5 boxes sitting on the ground
+        # Drone-delivered weapon crates: 7x6 boxes sitting on the ground
         for c in self.weapon_crates:
             if c.claimed or not c.grounded:
                 continue
-            if (c.x < ax + aw and c.x + 5 > ax
-                    and c.y < ay + ah and c.y + 5 > ay):
+            if (c.x < ax + aw and c.x + 7 > ax
+                    and c.y < ay + ah and c.y + 6 > ay):
                 c.claimed = True
                 self._grant_weapon(c.kind)
+        # Golden SSL cert dropped by the boss
+        if self.ssl_cert is not None and not self.ssl_cert.claimed:
+            sc = self.ssl_cert
+            if (sc.x < ax + aw and sc.x + 7 > ax
+                    and sc.y < ay + ah and sc.y + 9 > ay):
+                sc.claimed = True
+                self._advance_level()
 
     def tick(self, dt, keys):
         """Advance world state by dt seconds.
@@ -1200,8 +1394,7 @@ class World:
             d.x += d.vx * dt
             d.anim_t += dt
             if d.state == "approaching":
-                # Drop the crate when the drone passes its target_x. Direction
-                # of approach is in vx's sign.
+                # Drop the crate when the drone passes its target_x.
                 passed = (d.vx > 0 and d.x >= d.target_x) \
                       or (d.vx < 0 and d.x <= d.target_x)
                 if passed:
@@ -1212,6 +1405,23 @@ class World:
             if d.x < self.camera_x - 30 or d.x > self.camera_x + self.fb_w + 30:
                 d.alive = False
         self.drones = [d for d in self.drones if d.alive]
+        # Drone propeller buzz: loop while ANY drone is alive, stop when none.
+        any_alive = bool(self.drones)
+        if any_alive:
+            if self._drone_channel is None or not self._drone_channel.get_busy():
+                snd = _SFX_CACHE.get("drone")
+                if snd is not None:
+                    try:
+                        self._drone_channel = snd.play(loops=-1)
+                    except pygame.error:
+                        pass
+        else:
+            if self._drone_channel is not None:
+                try:
+                    self._drone_channel.stop()
+                except pygame.error:
+                    pass
+                self._drone_channel = None
 
         # ---- weapon crates: gravity + ground/obstacle landing ----
         for c in self.weapon_crates:
@@ -1288,8 +1498,12 @@ class World:
                     play("hit")
                     if b.hp <= 0:
                         b.alive = False
-                        self.message = "OVERLORD UNINSTALLED."
-                        self.message_until = time.time() + 2.0
+                        # Drop the golden SSL cert at the boss's location
+                        cert_x = int(b.x + (BOSS_W - 7) // 2)
+                        cert_y = int(self.ground_y - 9)
+                        self.ssl_cert = SSLCert(cert_x, cert_y)
+                        self.message = "ROOT CERT DROPPED!"
+                        self.message_until = time.time() + 2.4
                         play("kill")
                     break
             # Boss touches player
@@ -1314,12 +1528,6 @@ class World:
             self.state = "lose"
             self.end_message = random.choice(DEATH_QUOTES)
             play("lose")
-        elif (self.kills >= TOTAL_ENEMIES
-              and self.boss is not None and not self.boss.alive
-              and self.player_x >= self.world_w - 30):
-            self.state = "win"
-            self.end_message = random.choice(WIN_QUOTES)
-            play("win")
 
 
 # ===================================================================
@@ -1396,17 +1604,30 @@ def render_world(fb, world):
             bob = 0 if pulse < 1 else 1
             fb.blit_sprite(POWERUP_RAPID, sx, p[2] - bob)
 
-    # Drone-delivered weapon crates (sit on the ground after landing)
+    # Drone-delivered weapon crates: each kind has its own sprite (no
+    # text label needed -- the icon itself tells you what's inside).
     for wc in world.weapon_crates:
         if wc.claimed:
             continue
         sx = wc.x - cx
-        if -6 <= sx < fb.w + 6:
-            fb.blit_sprite(WEAPON_CRATE, sx, int(wc.y))
-            # 1-letter label above the crate so the player knows what's coming
-            label = wc.kind[0]   # R / S / P
-            lw = 5
-            fb.blit_text(label, sx, int(wc.y) - 8, PAL['Y'])
+        if -8 <= sx < fb.w + 8:
+            sprite = (WEAPON_CRATE_RAPID if wc.kind == "RAPID"
+                      else WEAPON_CRATE_SPREAD if wc.kind == "SPREAD"
+                      else WEAPON_CRATE_PIERCE)
+            fb.blit_sprite(sprite, sx, int(wc.y))
+
+    # Golden SSL cert (drops when boss dies; bob + sparkle so it sells)
+    if world.ssl_cert is not None and not world.ssl_cert.claimed:
+        sc = world.ssl_cert
+        sx = sc.x - cx
+        if -8 <= sx < fb.w + 8:
+            bob = int(round(1.5 * math.sin(time.time() * 5)))
+            fb.blit_sprite(SSL_CERT, sx, sc.y + bob)
+            # sparkle pixel that orbits
+            spark_t = time.time() * 4
+            sparkle_x = sx + 3 + int(round(4 * math.cos(spark_t)))
+            sparkle_y = sc.y + 4 + bob + int(round(2 * math.sin(spark_t)))
+            fb.set(sparkle_x, sparkle_y, PAL['S'])
 
     # Boss (drawn before regular enemies so they overlap correctly)
     if world.boss is not None and world.boss.alive:
@@ -1681,6 +1902,17 @@ def _generate_sfx_wav(spec, path):
                 env = 1.0 - (i / max(1, per - 1)) * 0.5  # slight per-note decay
                 v = VOL if (i % period) < half else -VOL
                 samples[idx] = max(-32767, min(32767, int(v * env)))
+    elif mode == "buzz":
+        # Continuous, looping rotor buzz. Square wave carrier with a
+        # gentle 25 Hz AM. Volume capped lower because this loops while
+        # the drone is on screen.
+        f = f0
+        period = max(2, int(round(SR / f)))
+        half = period // 2
+        for i in range(n):
+            am = 0.6 + 0.4 * abs(math.sin(2 * math.pi * 25 * i / SR))
+            v = VOL if (i % period) < half else -VOL
+            samples[i] = max(-32767, min(32767, int(v * am * 0.40)))
     else:  # 'down' (or 'up') -- linear pitch glide
         for i in range(n):
             t = i / max(1, n - 1)

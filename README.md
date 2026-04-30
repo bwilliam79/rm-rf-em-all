@@ -46,15 +46,15 @@ a fake-terminal certificate of root access:
 
 ## What it is
 
-A pygame pixel-art side-scroller. The world is a few screens wide, the
-camera follows you, and there are crate stacks to jump on or over,
-**pits in the floor** to leap over (or fall into and respawn),
-**floppy disks** to collect, and a one-shot **RAPID powerup** that
-halves the slingshot cooldown for 8 seconds. Killed ghouls sometimes
-trigger a **delivery drone** that hovers in and drops a weapon crate
-(RAPID / SPREAD / PIERCE). At the end of the world the **OVERLORD**
-shows up -- you have to put it down before the certificate of root
-access pops.
+A pygame pixel-art side-scroller across **three themed levels** --
+brick corridor, server room, deep-terminal phosphor green. Each level
+ends with a fight against the **OVERLORD**, who drops a golden **SSL
+cert** when killed. Walk over the cert to advance to the next level
+(or, on the final level, to claim the certificate of root access).
+Along the way: crate stacks to jump on/over, **pits** to leap over
+(or fall into and respawn), **floppy disks** to collect, and a
+**delivery drone** that buzzes in from off-screen with a weapon crate
+(RAPID / SPREAD / PIERCE) any time you kill a ghoul.
 
 ## Requirements
 
@@ -92,9 +92,11 @@ chicken out.
 ## How to win
 
 Kill every ghoul (`X` to fire), then put down the **OVERLORD** that
-arrives near the end of the level, then walk to the right edge to
-claim the certificate. Watch your footing -- pits = bad. Grab floppy
-disks for completionist nerd points. Killed ghouls sometimes summon a
+arrives near the end of the level, then walk over the **golden SSL
+cert** it drops to advance to the next level. Three levels total --
+clear the third and you get the goofy "root access granted"
+certificate. Watch your footing (pits = bad). Grab floppy disks for
+completionist nerd points. Killed ghouls sometimes summon a buzzing
 delivery drone that drops a Contra-style weapon crate:
 
 | Crate    | Effect                              |
@@ -106,12 +108,32 @@ delivery drone that drops a Contra-style weapon crate:
 ## How to uninstall
 
 ```bash
-rm -rf em-all
+rm -rf 'em all
 ```
 
 (It is literally in the name.)
 
 ## Status
+
+**v0.9** -- three themed **levels** (BRICK CORRIDOR -> SERVER ROOM ->
+DEEP TERMINAL) with palette swaps that retint the walls, ground, sky,
+and the ghouls themselves (red -> cyan -> phosphor green). Each level
+ends with the OVERLORD; killing the boss now drops a **golden SSL
+cert** that you walk over to advance (or to win the game on level 3) --
+much clearer end-of-level signal than 'walk to the right edge.' Each
+weapon kind (`RAPID`, `SPREAD`, `PIERCE`) now has its own crate sprite
+instead of a uniform yellow box with a letter on top. Delivery drones
+also got a continuous buzzing **propeller sound** that loops while
+they're on screen and stops when they leave, so you actually hear
+them coming.
+
+Bug fixes:
+- Boss hit detection was only registering ~1 in 30 shots due to a
+  CPython id() reuse issue (target hit_set's still contained ids of
+  GC'd pellets that got reassigned to fresh ones). Fixed by tracking
+  hit-state on the pellet (short-lived) instead of on the target.
+- Drone sprite redesigned as a proper 12x6 quadcopter with rotors top
+  and bottom, plus a sine-bob so it visibly flies rather than glides.
 
 **v0.8** -- fullscreen by default (F11 toggles), an end-of-level
 **boss** (the OVERLORD: a 2x-scale purple-tinted ghoul with 8 HP and

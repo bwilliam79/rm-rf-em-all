@@ -1,10 +1,14 @@
 # RM -RF 'EM ALL
 
-A goofy 8-bit pixel-art side-scroller that runs entirely in your terminal.
-Half-block ANSI truecolor pixels, a blinking splash screen, a
+A goofy 8-bit pixel-art side-scroller, now in a real pygame window.
+Crisp nearest-neighbor scaled pixels, a blinking splash screen, a
 **runtime-generated chiptune**, and developer humor instead of taste.
-You play a nerd with glasses and a slingshot. Red ghouls shamble in.
-You pelt them.
+You play a nerd in a lab coat with a slingshot. Red ghouls shamble in
+from both sides. You pelt them.
+
+(Earlier versions ran entirely inside a terminal using half-block ANSI
+pixels. v0.7 ported to pygame so we get real key-up events, simultaneous
+keys, and Linux/Windows portability — the controls are finally correct.)
 
 ## Screenshots
 
@@ -16,8 +20,8 @@ to start the game and mercifully end the music.)
 ![splash screen: RM -RF 'EM ALL banner with red->green fire-gradient title, skull, starfield, CRT scanlines](docs/splash.png)
 
 *(Rendered straight from the in-game framebuffer, then upscaled 4x with
-nearest-neighbor so the pixels stay sharp. In your real terminal the
-prompt also blinks; this is a static snapshot.)*
+nearest-neighbor so the pixels stay sharp. In the real game the prompt
+blinks; this is a static snapshot.)*
 
 ### In-game
 
@@ -30,9 +34,8 @@ camera follows the player.
 ![in-game: lab-coat nerd mid-jump over a pit between two ghouls coming from both sides](docs/ingame.png)
 
 *(Same source: real framebuffer output, 4x nearest-neighbor upscale.
-The actual game renders this scene live in your terminal using
-upper-half-block characters with truecolor fg/bg per cell, doubling the
-vertical pixel resolution.)*
+The actual game renders the same internal 160x80 surface scaled up 6x
+to a 960x480 pygame window.)*
 
 ### End-of-level certificate
 
@@ -43,42 +46,42 @@ a fake-terminal certificate of root access:
 
 ## What it is
 
-A pure-stdlib Python pixel-art side-scroller. The world is a few
-screens wide, the camera follows you, and there are crate stacks to
-jump on or over, **pits in the floor** to leap over (or fall into and
-respawn), **floppy disks** to collect, and a one-shot **RAPID powerup**
-that halves the slingshot cooldown for 8 seconds. Kill all the ghouls
-and reach the right edge to receive a goofy "root access granted"
-certificate. Color rendering via ANSI truecolor + `▀` half-block
-characters, plus a pile of dumb taunts. Crude on purpose.
+A pygame pixel-art side-scroller. The world is a few screens wide, the
+camera follows you, and there are crate stacks to jump on or over,
+**pits in the floor** to leap over (or fall into and respawn),
+**floppy disks** to collect, and a one-shot **RAPID powerup** that
+halves the slingshot cooldown for 8 seconds. Kill all the ghouls and
+reach the right edge to receive a goofy "root access granted"
+certificate.
 
 ## Requirements
 
-- **macOS** (uses `afplay` for sound effects and theme music -- zero install)
 - **Python 3.8+**
-- A terminal at least **40 cols x 15 rows** (80x24+ recommended)
-- A terminal with ANSI truecolor support (Terminal.app, iTerm2, Ghostty all work)
+- **pygame 2.5+** (`pip3 install pygame` or `pip3 install -r requirements.txt`)
+- macOS, Linux, or Windows -- anywhere pygame runs.
 
 ## Run
 
 ```bash
+pip3 install -r requirements.txt
 python3 game.py
 ```
 
-On first launch the game generates an ~11-second palm-muted tritone riff
-(square wave + power-chord fifth, E2 root, ~176 bpm gallop) in your temp
-dir and loops it during the splash. Press **ENTER** to start the game
-(music stops), or **Q** to chicken out.
+A 960x480 pygame window opens. On first launch the game synthesizes
+a ~11-second palm-muted tritone riff (square wave + power-chord fifth,
+E2 root, ~176 bpm gallop) plus the SFX bleeps to your temp dir; the
+theme loops on the splash. Press **ENTER** to start (music stops), or
+**Q** / close the window to chicken out.
 
 ## Controls
 
-| Key           | Action                |
-|---------------|-----------------------|
-| `Left` / `Right` | Walk left / right  |
-| `Space`       | Jump                  |
-| `X`           | Shoot slingshot       |
-| `Q`           | Quit                  |
-| `Up`          | (reserved for future ladders / vertical movement) |
+| Key                | Action                |
+|--------------------|-----------------------|
+| `Left` / `Right` (or `A` / `D`) | Walk left / right  |
+| `Space`            | Jump                  |
+| `X`                | Shoot slingshot       |
+| `Q` or `Esc`       | Quit                  |
+| `Up`               | (reserved for future ladders / vertical movement) |
 
 ## How to win
 
@@ -96,6 +99,17 @@ rm -rf em-all
 (It is literally in the name.)
 
 ## Status
+
+**v0.7** -- ported from terminal stdin to a real pygame window. Real
+key-up events make the controls trivially correct: held = walk,
+released = stop. All the workaround machinery from v0.4-v0.6
+(`MOVE_HOLD_S`, `air_dir`, jump-intent windows, action-grace carry
+helpers) is gone. SFX are now synthesized procedurally at first
+launch (square-wave bleeps + a noise burst for kills), and the theme
+loops via `pygame.mixer.music`. Internal pixel res stays at 160x80
+(so all the existing sprites and level gen Just Work) and the window
+is a 6x nearest-neighbor scale (960x480) for crisp pixels. macOS,
+Linux, and Windows now all work via `pip install pygame`.
 
 **v0.6** -- snappier controls, smarter ghouls. Bumped target FPS from
 30 to 60 so input poll rate doubles and motion smooths out, refactored

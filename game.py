@@ -1,46 +1,57 @@
 #!/usr/bin/env python3
-"""RM -RF 'EM ALL -- terminal pixel-art side-scroller.
+"""RM -RF 'EM ALL -- 8-bit pixel-art side-scroller (pygame edition).
 
-Renders 8-bit pixel art into your terminal using upper-half-block characters
-plus 24-bit ANSI truecolor (each cell holds two stacked pixels: fg = top,
-bg = bottom). The player is a nerd with glasses and a slingshot; red ghouls
-shamble in from the right and you pelt them. macOS only -- uses `afplay`
-for sound and a stdlib `wave` chiptune for theme music.
+The original ran in a terminal with half-block ANSI truecolor pixels. This
+version renders to a real pygame window so we get true keyboard state
+(key-up + simultaneous keys), making the controls trivially correct on
+macOS, Linux, and Windows. The pixel-art look is preserved: we render to
+a small internal surface (160x80) and scale up with nearest-neighbor.
 """
 
 import array
 import os
 import random
-import select
-import subprocess
 import sys
 import tempfile
-import termios
-import threading
 import time
-import tty
 import wave
 
+try:
+    import pygame
+except ImportError:
+    sys.stderr.write(
+        "rm-rf-em-all needs pygame. Install with:\n"
+        "    pip3 install pygame\n"
+    )
+    sys.exit(1)
+
 # ===================================================================
-# Tuning
+# Display tuning -- internal resolution preserved from the terminal
+# version so all the existing sprite/level code Just Works. Scaled up
+# nearest-neighbor in the window for crisp pixels.
 # ===================================================================
-TARGET_FPS         = 60        # bumped from 30 -- doubles input poll rate, halves
-FRAME_DT           = 1.0 / TARGET_FPS  # input latency, smooths motion.
-PLAYER_MIN_X       = 6
-# All physics are now expressed in real-time (px/sec, px/sec^2). Per-tick
-# values get derived in tick() via dt so physics is identical at any FPS.
-PLAYER_PX_PER_SEC      = 70.0   # walk speed (px/sec)
-MOVE_HOLD_S            = 0.40   # extends a single keypress this long so we walk
-                                # through the OS auto-repeat pre-delay (250-500ms).
+INTERNAL_W         = 160
+INTERNAL_H         = 80
+WINDOW_SCALE       = 6
+WINDOW_W           = INTERNAL_W * WINDOW_SCALE   # 960
+WINDOW_H           = INTERNAL_H * WINDOW_SCALE   # 480
+WINDOW_TITLE       = "RM -RF 'EM ALL"
+
+# ===================================================================
+# Gameplay tuning. All physics in real-time units (px/sec, px/sec^2)
+# and integrated against dt, so frame rate doesn't change behavior.
+# ===================================================================
+TARGET_FPS             = 60
+PLAYER_MIN_X           = 6
+PLAYER_PX_PER_SEC      = 70.0
 WORLD_SCREENS          = 3
 CAMERA_DEAD_LO         = 0.35
 CAMERA_DEAD_HI         = 0.55
-PELLET_PX_PER_SEC      = 160.0  # ~50% snappier than before.
-PELLET_COOLDOWN        = 0.18   # seconds between shots
-JUMP_V0_PX_PER_SEC     = 150.0  # initial jump velocity. With GRAVITY below,
-GRAVITY_PX_PER_SEC2    = 460.0  # peak jump = v0^2 / (2g) ~ 24 px (clears a
-                                # 2-stack crate, 18 px, with comfortable margin).
-ENEMY_PX_PER_SEC_MIN   = 14.0   # ghoul shamble speed. 14 = leisurely, 28 = brisk.
+PELLET_PX_PER_SEC      = 160.0
+PELLET_COOLDOWN        = 0.18
+JUMP_V0_PX_PER_SEC     = 150.0
+GRAVITY_PX_PER_SEC2    = 460.0  # peak jump ~ 24 px, clears 2-stack crate (18 px)
+ENEMY_PX_PER_SEC_MIN   = 14.0
 ENEMY_PX_PER_SEC_MAX   = 28.0
 ENEMY_SPAWN_MIN        = 0.9
 ENEMY_SPAWN_MAX        = 2.0
@@ -76,28 +87,24 @@ DEATH_QUOTES = [
     "kernel panic -- not syncing: attempted to kill you",
 ]
 
-SOUNDS = {
-    "shoot": "/System/Library/Sounds/Pop.aiff",
-    "kill":  "/System/Library/Sounds/Glass.aiff",
-    "miss":  "/System/Library/Sounds/Tink.aiff",
-    "win":   "/System/Library/Sounds/Hero.aiff",
-    "lose":  "/System/Library/Sounds/Basso.aiff",
-    "hit":   "/System/Library/Sounds/Bottle.aiff",
+# ===================================================================
+# Audio: SFX are tiny procedural square-wave bleeps generated to WAV
+# files in temp at first launch and loaded as pygame.mixer.Sound objects.
+# Theme music uses generate_theme() (preserved from the terminal version).
+# ===================================================================
+SFX_SPECS = {
+    # name -> (frequencies in Hz, duration_s, mode)
+    # mode 'down': linear pitch glide from f0 to f1
+    # mode 'noise': band-limited noise
+    "shoot": ((900.0, 1400.0), 0.05, "down"),
+    "kill":  ((220.0, 80.0),   0.18, "noise"),
+    "hit":   ((140.0, 70.0),   0.18, "down"),
+    "win":   ((392.0, 523.0),  0.50, "arp"),
+    "lose":  ((196.0, 110.0),  0.55, "down"),
+    "miss":  ((1200.0, 1700.0), 0.04, "down"),
 }
-
-# ===================================================================
-# ANSI helpers
-# ===================================================================
-def fg_ansi(r, g, b): return f"\x1b[38;2;{r};{g};{b}m"
-def bg_ansi(r, g, b): return f"\x1b[48;2;{r};{g};{b}m"
-
-RESET   = "\x1b[0m"
-HIDE    = "\x1b[?25l"
-SHOW    = "\x1b[?25h"
-CLEAR   = "\x1b[2J"
-HOME    = "\x1b[H"
-NORM_CK = "\x1b[?1l"  # normal (not application) cursor-key mode
-HALF    = "\u2580"    # upper half block
+_SFX_CACHE = {}        # name -> pygame.mixer.Sound
+_MUSIC_PATH = None     # path to the theme WAV (set in init_audio)
 
 # ===================================================================
 # Palette - single-char-per-pixel keys for sprite strings
@@ -348,49 +355,46 @@ FONT = {
 # Framebuffer + half-block renderer
 # ===================================================================
 class Framebuffer:
-    """RGB framebuffer rendered with upper-half-block + truecolor.
-
-    Each terminal cell shows two stacked pixels: fg = top pixel, bg = bottom.
-    Writing pixel (x, y) at width W produces a character at column x, row y//2.
+    """Thin wrapper over a pygame Surface that exposes the same drawing
+    API the rest of the game already calls (set / fill_rect / blit_sprite
+    / blit_text / blit_text_scaled). Drawing happens at the internal
+    resolution; main() scales the surface to the window once per frame.
     """
-    __slots__ = ("w", "h", "px")
+    __slots__ = ("w", "h", "surface", "_sprite_cache")
 
     def __init__(self, w, h):
-        if h % 2:  # round up to even so half-block pairs align
-            h += 1
         self.w = w
         self.h = h
-        self.px = [(0, 0, 0)] * (w * h)
+        self.surface = pygame.Surface((w, h))
+        self._sprite_cache = {}  # id(sprite_rows) -> (right_facing, left_facing)
 
     def clear(self, color):
-        self.px = [color] * (self.w * self.h)
+        self.surface.fill(color)
 
     def set(self, x, y, color):
         if 0 <= x < self.w and 0 <= y < self.h and color is not None:
-            self.px[y * self.w + x] = color
+            self.surface.set_at((int(x), int(y)), color)
 
     def fill_rect(self, x, y, w, h, color):
         if color is None:
             return
-        for yy in range(max(0, y), min(self.h, y + h)):
-            base = yy * self.w
-            for xx in range(max(0, x), min(self.w, x + w)):
-                self.px[base + xx] = color
+        # pygame clips automatically.
+        self.surface.fill(color, (int(x), int(y), int(w), int(h)))
 
     def blit_sprite(self, sprite_rows, x0, y0, palette=PAL, flip=False):
-        for dy, row in enumerate(sprite_rows):
-            if flip:
-                row = row[::-1]
-            for dx, ch in enumerate(row):
-                color = palette.get(ch)
-                if color is not None:
-                    self.set(x0 + dx, y0 + dy, color)
+        key = id(sprite_rows)
+        cached = self._sprite_cache.get(key)
+        if cached is None:
+            cached = (_make_sprite_surface(sprite_rows, palette),
+                      _make_sprite_surface(sprite_rows, palette, flip=True))
+            self._sprite_cache[key] = cached
+        surf = cached[1] if flip else cached[0]
+        self.surface.blit(surf, (int(x0), int(y0)))
 
     def blit_text(self, text, x0, y0, color, spacing=1):
         """Render uppercase text using FONT (5x7 glyphs)."""
         cx = x0
-        upper = text.upper()
-        for ch in upper:
+        for ch in text.upper():
             glyph = FONT.get(ch, FONT[" "])
             for ry, row in enumerate(glyph):
                 for rx, c in enumerate(row):
@@ -399,8 +403,8 @@ class Framebuffer:
             cx += 5 + spacing
 
     def blit_text_scaled(self, text, x0, y0, scale, color, spacing=1, row_colors=None):
-        """Render uppercase text scaled. row_colors (list of 7) overrides color
-        per glyph row (for fire/rainbow gradients). spacing is pre-scale."""
+        """Render uppercase text scaled. row_colors (list of 7) overrides
+        color per glyph row (for fire/rainbow gradients)."""
         cx = x0
         for ch in text.upper():
             glyph = FONT.get(ch, FONT[" "])
@@ -417,30 +421,21 @@ class Framebuffer:
         n = len(text)
         return n * 5 * scale + max(0, n - 1) * spacing * scale
 
-    def render(self):
-        """Return the ANSI string that draws the framebuffer."""
-        out = [HOME]
-        prev_fg = prev_bg = None
-        w = self.w
-        for cy in range(0, self.h, 2):
-            row_top = cy * w
-            row_bot = (cy + 1) * w
-            line = []
-            for x in range(w):
-                top = self.px[row_top + x]
-                bot = self.px[row_bot + x]
-                if top != prev_fg:
-                    line.append(fg_ansi(*top))
-                    prev_fg = top
-                if bot != prev_bg:
-                    line.append(bg_ansi(*bot))
-                    prev_bg = bot
-                line.append(HALF)
-            line.append(RESET)
-            line.append("\r\n")
-            out.append("".join(line))
-            prev_fg = prev_bg = None  # reset across lines (terminal may not preserve)
-        return "".join(out)
+
+def _make_sprite_surface(sprite_rows, palette=PAL, flip=False):
+    """Convert a char-grid sprite to a pygame Surface with per-pixel alpha
+    (any palette key whose color is None becomes transparent)."""
+    h = len(sprite_rows)
+    w = len(sprite_rows[0])
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    for y, row in enumerate(sprite_rows):
+        if flip:
+            row = row[::-1]
+        for x, ch in enumerate(row):
+            color = palette.get(ch)
+            if color is not None:
+                surf.set_at((x, y), color)
+    return surf
 
 
 # ===================================================================
@@ -580,18 +575,6 @@ class World:
         self.player_vy = 0.0
         self.player_grounded = True
         self.player_face_right = True
-        # held-key bridge: extend the effect of each LEFT/RIGHT key event for
-        # MOVE_HOLD_S so we keep walking through the OS auto-repeat pre-delay.
-        self.hold_left_until = 0.0
-        self.hold_right_until = 0.0
-        # Last-press timestamps -- used at jump time to capture the player's
-        # intended direction even if the hold window has already expired
-        # during the OS auto-repeat pre-delay.
-        self.last_press_left = 0.0
-        self.last_press_right = 0.0
-        # Direction to drift while airborne: -1 left, 0 none, +1 right.
-        # Set at jump time, cleared when grounded.
-        self.air_dir = 0
         self.pellets = []
         self.enemies = []
         # obstacles (crate stacks) in world coords: list of (x, y, w, h)
@@ -795,7 +778,6 @@ class World:
         self.player_y = self._floor_top_at(self.last_safe_x) - len(NERD)
         self.player_vy = 0.0
         self.player_grounded = True
-        self.air_dir = 0
         self.last_hit = time.time()       # i-frames after respawn
         self.message = "You fell in. Try harder."
         self.message_until = time.time() + 1.4
@@ -827,89 +809,43 @@ class World:
                     play("kill")
 
     def tick(self, dt, keys):
+        """Advance world state by dt seconds.
+
+        keys is a list mixing held-direction strings and one-frame action
+        events (see collect_input):
+          * 'LEFT' / 'RIGHT' -- present every frame the key is held
+          * 'JUMP'           -- one frame on SPACE press
+          * 'SHOOT'          -- one frame on X press
+        With pygame providing real key-up events, the rest is trivial:
+        held = walk, tapped = act.
+        """
         if self.state != "playing":
             return
 
-        # input. LEFT/RIGHT also extend a "hold window" so movement is
-        # continuous while held, even during the OS auto-repeat pre-delay.
-        now_t = time.time()
+        held_left  = "LEFT"  in keys
+        held_right = "RIGHT" in keys
 
-        def _carry_walk_through_action():
-            """The fundamental problem: in cbreak mode terminals don't
-            deliver key-up events, and macOS suspends an arrow's
-            auto-repeat while a second key (X / SPACE) is held. After the
-            action key is released we cannot tell whether the user is
-            still holding the arrow or not.
-
-            Strategy: while the player IS currently walking and presses
-            an action key, extend the walk grace to ACTION_GRACE_S
-            (generous, ~1 s). If macOS resumes arrow auto-repeat after
-            the action key is released, the arrow events refresh the
-            hold normally and motion is continuous. If macOS doesn't
-            resume, the player has ~1 s to re-acquire the direction
-            without seeing the walk hiccup. Idle for ACTION_GRACE_S and
-            the walk drops, so 'release everything to stop' still works.
-
-            Plain walking (no action key) still uses MOVE_HOLD_S, so
-            single-tap nudges don't overshoot."""
-            ACTION_GRACE_S = 1.0
-            if now_t < self.hold_right_until:
-                self.hold_right_until = max(self.hold_right_until,
-                                            now_t + ACTION_GRACE_S)
-                self.last_press_right = now_t
-            elif now_t < self.hold_left_until:
-                self.hold_left_until = max(self.hold_left_until,
-                                           now_t + ACTION_GRACE_S)
-                self.last_press_left = now_t
-
+        # Handle one-frame action events
         for k in keys:
-            if k == "LEFT":
-                self.hold_left_until = now_t + MOVE_HOLD_S
-                self.last_press_left = now_t
-                self.player_face_right = False
-            elif k == "RIGHT":
-                self.hold_right_until = now_t + MOVE_HOLD_S
-                self.last_press_right = now_t
-                self.player_face_right = True
-            elif k == " ":
-                # SPACE = jump (NES/SNES platformer convention).
-                # UP is reserved for future ladder/vertical movement.
+            if k == "JUMP":
                 if self.player_grounded:
-                    self.player_vy = -JUMP_V0_PX_PER_SEC  # px/sec, integrated below
+                    self.player_vy = -JUMP_V0_PX_PER_SEC
                     self.player_grounded = False
-                    # Capture jump direction from recent press history. The OS
-                    # auto-repeat pre-delay (~250-500ms) can leave a gap where
-                    # hold_*_until is expired even though the user is still
-                    # holding the key. Looking at last_press_* lets us preserve
-                    # the player's intent through that gap.
-                    JUMP_INTENT_WINDOW = 0.6
-                    left_recent  = (now_t - self.last_press_left)  < JUMP_INTENT_WINDOW
-                    right_recent = (now_t - self.last_press_right) < JUMP_INTENT_WINDOW
-                    if left_recent and not right_recent:
-                        self.air_dir = -1
-                    elif right_recent and not left_recent:
-                        self.air_dir = +1
-                    else:
-                        self.air_dir = 0
-                _carry_walk_through_action()
-            elif k in ("x", "X"):
-                # X = shoot (Mega Man / NES B-button convention).
+            elif k == "SHOOT":
                 self.shoot()
-                _carry_walk_through_action()
+
+        if held_left:
+            self.player_face_right = False
+        if held_right:
+            self.player_face_right = True
 
         # ---- horizontal motion with obstacle collision ----
         step = PLAYER_PX_PER_SEC * dt
         dx = 0.0
-        if now_t < self.hold_left_until:
+        if held_left:
             dx -= step
-        if now_t < self.hold_right_until:
+        if held_right:
             dx += step
-        # In-air persistence: if no direction is currently within the hold
-        # window but we captured air_dir at jump time, keep drifting that way
-        # (this is what lets you actually move sideways while jumping when
-        # the OS auto-repeat hasn't caught up yet).
-        if dx == 0.0 and not self.player_grounded and self.air_dir != 0:
-            dx = self.air_dir * step
         if dx != 0.0:
             new_x = max(PLAYER_MIN_X, min(self.player_max_x(), self.player_x + dx))
             hit = self._hits_any_obstacle(new_x, self.player_y)
@@ -939,7 +875,6 @@ class World:
                     self.player_y = floor - len(NERD)
                     self.player_vy = 0.0
                     self.player_grounded = True
-                    self.air_dir = 0
                 else:
                     self.player_y = new_y
             else:
@@ -1351,17 +1286,90 @@ def _draw_certificate(fb, world):
 # Audio (kept from prior version)
 # ===================================================================
 def play(name):
-    path = SOUNDS.get(name)
-    if not path or not os.path.exists(path):
-        return
+    """Play a one-shot SFX. Silently no-ops if audio init failed."""
+    snd = _SFX_CACHE.get(name)
+    if snd is not None:
+        try:
+            snd.play()
+        except pygame.error:
+            pass
+
+
+def _generate_sfx_wav(spec, path):
+    """Synthesize one of the procedural SFX to a WAV file."""
+    (f0, f1), dur, mode = spec
+    SR = 22050
+    n = int(SR * dur)
+    samples = array.array("h", [0] * n)
+    VOL = 9000
+    rng = random.Random(int(f0 * 1000 + dur * 100))
+    if mode == "noise":
+        # Pitched noise that decays
+        for i in range(n):
+            env = 1.0 - i / max(1, n - 1)
+            s = int(rng.uniform(-1.0, 1.0) * VOL * env * env)
+            samples[i] = max(-32767, min(32767, s))
+    elif mode == "arp":
+        # Quick arpeggio: 4 ascending notes from f0 to f1
+        steps = 4
+        per = n // steps
+        for k in range(steps):
+            f = f0 * ((f1 / f0) ** (k / max(1, steps - 1)))
+            period = max(2, int(round(SR / f)))
+            half = period // 2
+            for i in range(per):
+                idx = k * per + i
+                if idx >= n:
+                    break
+                env = 1.0 - (i / max(1, per - 1)) * 0.5  # slight per-note decay
+                v = VOL if (i % period) < half else -VOL
+                samples[idx] = max(-32767, min(32767, int(v * env)))
+    else:  # 'down' (or 'up') -- linear pitch glide
+        for i in range(n):
+            t = i / max(1, n - 1)
+            f = f0 + (f1 - f0) * t
+            period = max(2, int(round(SR / f)))
+            half = period // 2
+            env = 1.0 - t
+            v = VOL if (i % period) < half else -VOL
+            samples[i] = max(-32767, min(32767, int(v * env)))
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(samples.tobytes())
+
+
+def init_audio():
+    """Initialize pygame.mixer, generate the theme + SFX (cached on disk)
+    and load them into pygame.mixer.Sound objects. Idempotent."""
+    global _MUSIC_PATH
     try:
-        subprocess.Popen(
-            ["afplay", path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except (FileNotFoundError, OSError):
-        pass
+        pygame.mixer.pre_init(frequency=22050, size=-16, channels=1, buffer=512)
+        pygame.mixer.init()
+    except pygame.error:
+        return  # no audio device; silent fallback
+    tmp = tempfile.gettempdir()
+    # Theme
+    _MUSIC_PATH = os.path.join(tmp, "rm_rf_em_all_theme_v2.wav")
+    if not os.path.exists(_MUSIC_PATH):
+        try:
+            generate_theme(_MUSIC_PATH)
+        except OSError:
+            _MUSIC_PATH = None
+    # SFX
+    for name, spec in SFX_SPECS.items():
+        path = os.path.join(tmp, f"rm_rf_em_all_sfx_{name}.wav")
+        if not os.path.exists(path):
+            try:
+                _generate_sfx_wav(spec, path)
+            except OSError:
+                continue
+        try:
+            _SFX_CACHE[name] = pygame.mixer.Sound(path)
+            _SFX_CACHE[name].set_volume(0.55)
+        except pygame.error:
+            pass
 
 
 def generate_theme(path):
@@ -1422,113 +1430,69 @@ def generate_theme(path):
         w.writeframes(samples.tobytes())
 
 
-_music_stop = threading.Event()
-_music_proc = [None]
-
-
-def start_music(wav_path):
-    def runner():
-        while not _music_stop.is_set():
-            try:
-                p = subprocess.Popen(
-                    ["afplay", wav_path],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                _music_proc[0] = p
-            except (FileNotFoundError, OSError):
-                return
-            while p.poll() is None:
-                if _music_stop.is_set():
-                    try:
-                        p.terminate()
-                    except Exception:
-                        pass
-                    return
-                time.sleep(0.1)
-    threading.Thread(target=runner, daemon=True).start()
+def start_music():
+    """Loop the theme via pygame.mixer.music."""
+    if _MUSIC_PATH is None:
+        return
+    try:
+        pygame.mixer.music.load(_MUSIC_PATH)
+        pygame.mixer.music.set_volume(0.45)
+        pygame.mixer.music.play(loops=-1)
+    except pygame.error:
+        pass
 
 
 def stop_music():
-    _music_stop.set()
-    p = _music_proc[0]
-    if p:
-        try:
-            p.terminate()
-        except Exception:
-            pass
-
-
-# ===================================================================
-# Terminal helpers
-# ===================================================================
-def get_screen_size():
     try:
-        sz = os.get_terminal_size()
-        cols = max(60, min(160, sz.columns))
-        rows = max(18, min(48, sz.lines - 1))
-        return cols, rows
-    except OSError:
-        return 80, 24
+        pygame.mixer.music.stop()
+    except pygame.error:
+        pass
 
 
-def get_keys():
-    """Drain every pending keypress. Returns a list (possibly empty)."""
+# ===================================================================
+# Input: pygame events + key state. We translate pygame to the same
+# string-based key vocabulary the rest of the code already uses
+# ("LEFT", "RIGHT") plus a few new tap names ("JUMP", "SHOOT", "QUIT",
+# "ENTER"). The world's tick() reads "LEFT"/"RIGHT" as held state and
+# "JUMP"/"SHOOT" as one-frame events.
+# ===================================================================
+def collect_input():
+    """Return (keys, quit). 'keys' is a list mixing held-direction strings
+    and one-frame action strings. 'quit' is True if the user closed the
+    window or pressed Q / Esc."""
     keys = []
-    fd = sys.stdin.fileno()
-    data = b""
-    while True:
-        r, _, _ = select.select([fd], [], [], 0)
-        if not r:
-            break
-        try:
-            chunk = os.read(fd, 64)
-        except (BlockingIOError, OSError):
-            break
-        if not chunk:
-            break
-        data += chunk
+    quit_flag = False
+    enter_flag = False
 
-    # If the read ended mid-escape-sequence, give the OS a tiny window to
-    # deliver the rest. 5 ms is plenty -- the entire CSI is normally one
-    # write -- and keeps input latency low at 60 fps.
-    if data.endswith(b"\x1b"):
-        r, _, _ = select.select([fd], [], [], 0.005)
-        if r:
-            try:
-                data += os.read(fd, 8)
-            except (BlockingIOError, OSError):
-                pass
-    if len(data) >= 2 and data[-2] == 0x1b and data[-1] in (0x5b, 0x4f):
-        r, _, _ = select.select([fd], [], [], 0.005)
-        if r:
-            try:
-                data += os.read(fd, 8)
-            except (BlockingIOError, OSError):
-                pass
+    # Drain event queue so KEYDOWN taps for jump/shoot/quit/enter are caught
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            quit_flag = True
+        elif event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_q, pygame.K_ESCAPE):
+                quit_flag = True
+            elif event.key == pygame.K_SPACE:
+                keys.append("JUMP")
+            elif event.key == pygame.K_x:
+                keys.append("SHOOT")
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                enter_flag = True
+                keys.append("ENTER")
 
-    i = 0
-    while i < len(data):
-        b = data[i]
-        if b == 0x1b:
-            if i + 1 < len(data) and data[i + 1] in (0x5b, 0x4f):
-                if i + 2 < len(data):
-                    c = data[i + 2]
-                    if c == 0x41: keys.append("UP")
-                    elif c == 0x42: keys.append("DOWN")
-                    elif c == 0x43: keys.append("RIGHT")
-                    elif c == 0x44: keys.append("LEFT")
-                    i += 3
-                    continue
-                i += 2
-                continue
-            i += 1
-        elif b < 128:
-            keys.append(chr(b))
-            i += 1
-        else:
-            i += 1
-    return keys
+    # Held-state for movement
+    pressed = pygame.key.get_pressed()
+    if pressed[pygame.K_LEFT] or pressed[pygame.K_a]:
+        keys.append("LEFT")
+    if pressed[pygame.K_RIGHT] or pressed[pygame.K_d]:
+        keys.append("RIGHT")
+
+    return keys, quit_flag, enter_flag
+
+
+def present(fb, screen):
+    """Scale the internal framebuffer to the window and flip the display."""
+    pygame.transform.scale(fb.surface, (screen.get_width(), screen.get_height()), screen)
+    pygame.display.flip()
 
 
 # ===================================================================
@@ -1653,11 +1617,11 @@ def render_splash(fb, blink_on):
     if blink_on:
         fb.blit_text(prompt, max(2, (fb.w - pw) // 2), y, (255, 230, 80))
 
-    # CRT scanlines: dim every other row
+    # CRT scanlines: dim every other row by overlaying a translucent black
+    scanline = pygame.Surface((fb.w, 1), pygame.SRCALPHA)
+    scanline.fill((0, 0, 0, 50))   # ~20% darkening
     for sy in range(1, fb.h, 2):
-        for x in range(fb.w):
-            r, g, b = fb.px[sy * fb.w + x]
-            fb.px[sy * fb.w + x] = (r * 4 // 5, g * 4 // 5, b * 4 // 5)
+        fb.surface.blit(scanline, (0, sy))
 
     # bezel border (1 pixel)
     border = (60, 60, 100)
@@ -1669,10 +1633,9 @@ def render_splash(fb, blink_on):
         fb.set(fb.w - 1, yy, border)
 
 
-def splash(cols, rows):
-    """Run the pixel-art splash loop. Returns True for ENTER, False for Q."""
-    fb_w, fb_h = cols, rows * 2
-    fb = Framebuffer(fb_w, fb_h)
+def splash(fb, screen, clock):
+    """Run the pixel-art splash loop. Returns True for ENTER, False for Q
+    or window-close."""
     blink_on = True
     last_blink = time.time()
     while True:
@@ -1681,92 +1644,61 @@ def splash(cols, rows):
             blink_on = not blink_on
             last_blink = now
 
-        # re-create fb if terminal resized
-        ncols, nrows = get_screen_size()
-        if (ncols, nrows) != (cols, rows):
-            cols, rows = ncols, nrows
-            fb = Framebuffer(cols, rows * 2)
-            sys.stdout.write(CLEAR)
+        keys, quit_flag, enter_flag = collect_input()
+        if quit_flag:
+            return False
+        if enter_flag:
+            return True
 
         render_splash(fb, blink_on)
-        sys.stdout.write(fb.render())
-        sys.stdout.flush()
-
-        for k in get_keys():
-            if k in ("\r", "\n"):
-                return True
-            if k in ("q", "Q"):
-                return False
-        time.sleep(0.06)
+        present(fb, screen)
+        clock.tick(TARGET_FPS)
 
 
 # ===================================================================
 # Main
 # ===================================================================
 def main():
-    if not sys.stdin.isatty():
-        print("RM -RF 'EM ALL needs a real terminal. Run it directly.", file=sys.stderr)
-        return 1
+    pygame.init()
+    init_audio()
 
-    theme_path = os.path.join(tempfile.gettempdir(), "rm_rf_em_all_theme_v2.wav")
+    flags = pygame.SCALED | pygame.RESIZABLE
+    screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+    pygame.display.set_caption(WINDOW_TITLE)
+    pygame.mouse.set_visible(False)
+    clock = pygame.time.Clock()
+
+    fb = Framebuffer(INTERNAL_W, INTERNAL_H)
+
     try:
-        if not os.path.exists(theme_path):
-            generate_theme(theme_path)
-        start_music(theme_path)
-    except Exception:
-        pass
-
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)
-        sys.stdout.write(CLEAR + HIDE + NORM_CK)
-        sys.stdout.flush()
-
-        if not splash(*get_screen_size()):
-            stop_music()
-            return 0
+        # ---- splash ----
+        start_music()
+        cont = splash(fb, screen, clock)
         stop_music()
-        sys.stdout.write(RESET + CLEAR)
-        sys.stdout.flush()
+        if not cont:
+            return 0
 
-        cols, rows = get_screen_size()
-        fb_w = cols
-        fb_h = rows * 2
-        fb = Framebuffer(fb_w, fb_h)
-        world = World(fb_w, fb_h)
+        # ---- gameplay ----
+        world = World(INTERNAL_W, INTERNAL_H)
         last = time.time()
         while True:
             now = time.time()
-            dt = now - last
+            dt = max(0.0, min(1.0 / 20.0, now - last))   # clamp big frame jumps
             last = now
 
-            ncols, nrows = get_screen_size()
-            if (ncols, nrows) != (cols, rows):
-                cols, rows = ncols, nrows
-                fb = Framebuffer(cols, rows * 2)
-                world.update_layout(fb.w, fb.h, world.ground_y)
-                sys.stdout.write(CLEAR)
-
-            keys = get_keys()
-            quit_flag = any(k in ("q", "Q") for k in keys)
+            keys, quit_flag, _ = collect_input()
             if quit_flag:
+                # Q always quits, even on win/lose screens
                 break
             if world.state == "playing":
                 world.tick(dt, keys)
 
             render_world(fb, world)
-            sys.stdout.write(fb.render())
-            sys.stdout.flush()
-
-            sleep_for = FRAME_DT - (time.time() - now)
-            if sleep_for > 0:
-                time.sleep(sleep_for)
+            present(fb, screen)
+            clock.tick(TARGET_FPS)
     finally:
         stop_music()
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        sys.stdout.write(RESET + CLEAR + HOME + SHOW)
-        sys.stdout.flush()
+        pygame.quit()
     return 0
 
 

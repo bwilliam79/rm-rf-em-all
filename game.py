@@ -582,6 +582,14 @@ class World:
         # MOVE_HOLD_S so we keep walking through the OS auto-repeat pre-delay.
         self.hold_left_until = 0.0
         self.hold_right_until = 0.0
+        # Last-press timestamps -- used at jump time to capture the player's
+        # intended direction even if the hold window has already expired
+        # during the OS auto-repeat pre-delay.
+        self.last_press_left = 0.0
+        self.last_press_right = 0.0
+        # Direction to drift while airborne: -1 left, 0 none, +1 right.
+        # Set at jump time, cleared when grounded.
+        self.air_dir = 0
         self.pellets = []
         self.enemies = []
         # obstacles (crate stacks) in world coords: list of (x, y, w, h)
@@ -784,6 +792,7 @@ class World:
         self.player_y = self._floor_top_at(self.last_safe_x) - len(NERD)
         self.player_vy = 0.0
         self.player_grounded = True
+        self.air_dir = 0
         self.last_hit = time.time()       # i-frames after respawn
         self.message = "You fell in. Try harder."
         self.message_until = time.time() + 1.4
@@ -824,9 +833,11 @@ class World:
         for k in keys:
             if k == "LEFT":
                 self.hold_left_until = now_t + MOVE_HOLD_S
+                self.last_press_left = now_t
                 self.player_face_right = False
             elif k == "RIGHT":
                 self.hold_right_until = now_t + MOVE_HOLD_S
+                self.last_press_right = now_t
                 self.player_face_right = True
             elif k == " ":
                 # SPACE = jump (NES/SNES platformer convention).
@@ -834,6 +845,20 @@ class World:
                 if self.player_grounded:
                     self.player_vy = -JUMP_V0
                     self.player_grounded = False
+                    # Capture jump direction from recent press history. The OS
+                    # auto-repeat pre-delay (~250-500ms) can leave a gap where
+                    # hold_*_until is expired even though the user is still
+                    # holding the key. Looking at last_press_* lets us preserve
+                    # the player's intent through that gap.
+                    JUMP_INTENT_WINDOW = 0.6
+                    left_recent  = (now_t - self.last_press_left)  < JUMP_INTENT_WINDOW
+                    right_recent = (now_t - self.last_press_right) < JUMP_INTENT_WINDOW
+                    if left_recent and not right_recent:
+                        self.air_dir = -1
+                    elif right_recent and not left_recent:
+                        self.air_dir = +1
+                    else:
+                        self.air_dir = 0
             elif k in ("x", "X"):
                 # X = shoot (Mega Man / NES B-button convention).
                 self.shoot()
@@ -845,6 +870,12 @@ class World:
             dx -= step
         if now_t < self.hold_right_until:
             dx += step
+        # In-air persistence: if no direction is currently within the hold
+        # window but we captured air_dir at jump time, keep drifting that way
+        # (this is what lets you actually move sideways while jumping when
+        # the OS auto-repeat hasn't caught up yet).
+        if dx == 0.0 and not self.player_grounded and self.air_dir != 0:
+            dx = self.air_dir * step
         if dx != 0.0:
             new_x = max(PLAYER_MIN_X, min(self.player_max_x(), self.player_x + dx))
             hit = self._hits_any_obstacle(new_x, self.player_y)
@@ -870,6 +901,7 @@ class World:
                     self.player_y = floor - len(NERD)
                     self.player_vy = 0.0
                     self.player_grounded = True
+                    self.air_dir = 0
                 else:
                     self.player_y = new_y
             else:

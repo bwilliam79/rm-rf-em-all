@@ -93,6 +93,10 @@ LEVEL_THEMES = {
             'V': (255, 240, 100),
             'm': ( 10,  30,  50),
             'i': ( 16,  50,  80),
+            # Server-rack obstacle: cool grey
+            'c': (105, 115, 130),
+            'C': ( 65,  75,  90),
+            'X': ( 25,  35,  50),
         },
         "boss_tint": (90, 160, 255, 255),
     },
@@ -116,6 +120,10 @@ LEVEL_THEMES = {
             'V': (255, 255, 180),
             'm': ( 10,  30,  10),
             'i': ( 20,  60,  20),
+            # Office chair: navy fabric + dark frame
+            'c': ( 50,  70, 130),
+            'C': ( 30,  45,  90),
+            'X': ( 15,  20,  40),
         },
         "boss_tint": (200, 255,  60, 255),
     },
@@ -345,6 +353,36 @@ CRATE = [
     "cCXCCCCXCc",
     "cCCCCCCCCc",
     "XXXXXXXXXX",
+]
+
+# 10x9 server-rack chunk -- the level-2 obstacle. Same footprint as a CRATE
+# so the existing collision math works unchanged. Status LEDs alternate.
+# 'h' (ground deep) is dark grey, 'X' is darker, 'C' is mid-tone.
+SERVER_RACK = [
+    "XXXXXXXXXX",
+    "XCCCCCCCCX",
+    "XCXCCCCXCX",
+    "XCCCCCCCCX",
+    "XCXCCCCXCX",
+    "XCCCCCCCCX",
+    "XCXCCCCXCX",
+    "XCCCCCCCCX",
+    "XXXXXXXXXX",
+]
+
+# 10x9 office chair -- the level-3 obstacle. Five-spoke base, post,
+# cushioned seat, high backrest. Drawn so the player can land on the
+# top of the backrest when jumping (top y stays the same as CRATE).
+OFFICE_CHAIR = [
+    "...XXXX...",
+    "..XCCCCX..",
+    "..XCCCCX..",
+    "..XCCCCX..",
+    "..XCCCCX..",
+    "..XCCCCX..",
+    "XXXXccXXXX",
+    "...XccX...",
+    "X.X.XX.X.X",
 ]
 
 # 5x6 floppy disk pickup
@@ -644,18 +682,18 @@ def _get_overlord_surface(anim_t, flip):
 # ===================================================================
 # Background (computed once per resolution)
 # ===================================================================
-def draw_background(fb, camera_x=0.0):
-    """Sky -> back wall -> ground. Wall + ground textures scroll with the
-    camera; sky and stars stay fixed (parallax at infinity)."""
+def draw_background(fb, camera_x=0.0, level=1):
+    """Sky -> back wall -> ground. Wall texture differs per level
+    (bricks for L1, server racks for L2, desks/monitors for L3). Wall +
+    ground textures scroll with the camera; sky and stars stay fixed."""
     w, h = fb.w, fb.h
     cx = int(camera_x)
 
-    # ground horizon line: ground takes bottom 22% of pixels
     ground_y = int(h * 0.78)
     wall_top = int(h * 0.18)
     wall_bot = ground_y - 1
 
-    # Sky gradient: 3 bands top to bottom (no scroll)
+    # Sky gradient (no scroll, 'parallax at infinity')
     for y in range(0, wall_top):
         t = y / max(1, wall_top - 1)
         if t < 0.5:
@@ -665,45 +703,33 @@ def draw_background(fb, camera_x=0.0):
         for x in range(w):
             fb.set(x, y, c)
 
-    # Stars (fixed in screen space — they're "at infinity")
-    rng = random.Random(42)
-    for _ in range(max(8, w // 8)):
-        sx = rng.randrange(w)
-        sy = rng.randrange(0, max(1, wall_top - 2))
-        fb.set(sx, sy, PAL['*'])
+    # Stars (only for level 1; the indoor levels don't have a sky)
+    if level == 1:
+        rng = random.Random(42)
+        for _ in range(max(8, w // 8)):
+            sx = rng.randrange(w)
+            sy = rng.randrange(0, max(1, wall_top - 2))
+            fb.set(sx, sy, PAL['*'])
 
     # Back wall fill
     fb.fill_rect(0, wall_top, w, wall_bot - wall_top + 1, PAL['j'])
 
-    # Horizontal mortar courses every 4 px (full width — same regardless of cx)
-    for r in range(wall_top, wall_bot + 1, 4):
-        for x in range(w):
-            fb.set(x, r, PAL['u'])
+    # Per-level wall texture
+    if level == 2:
+        _draw_wall_servers(fb, cx, wall_top, wall_bot)
+    elif level == 3:
+        _draw_wall_desks(fb, cx, wall_top, wall_bot, ground_y)
+    else:
+        _draw_wall_bricks(fb, cx, wall_top, wall_bot)
 
-    # Vertical mortar boundaries — scroll with camera, alternate offset per
-    # course so bricks look staggered.
-    for r in range(wall_top, wall_bot + 1, 4):
-        course_idx = (r - wall_top) // 4
-        course_offset = 5 if (course_idx % 2) else 0
-        # World-x boundaries are at multiples of 10 + course_offset.
-        # Pick the smallest screen_x in [-10, 0) that maps to one.
-        first = (course_offset - cx) % 10
-        if first > 0:
-            first -= 10
-        for sx in range(first, w, 10):
-            for dy in range(0, 4):
-                yy = r + dy
-                if yy <= wall_bot:
-                    fb.set(sx, yy, PAL['u'])
-
-    # Wall highlight band
+    # Wall highlight band along the top
     for x in range(w):
         fb.set(x, wall_top, PAL['J'])
 
     # Wall-floor seam shadow
     fb.fill_rect(0, ground_y - 1, w, 1, (20, 12, 6))
 
-    # Ground bands (3 colors top→bottom)
+    # Ground bands (3 colors top->bottom)
     for y in range(ground_y, h):
         t = (y - ground_y) / max(1, h - ground_y - 1)
         if t < 0.25:   c = PAL['g']
@@ -724,6 +750,131 @@ def draw_background(fb, camera_x=0.0):
         fb.set(sx, ground_y, PAL['q'])
 
     return ground_y, wall_top, wall_bot
+
+
+def _draw_wall_bricks(fb, cx, wall_top, wall_bot):
+    """Level 1: staggered brick courses with mortar lines."""
+    w = fb.w
+    for r in range(wall_top, wall_bot + 1, 4):
+        for x in range(w):
+            fb.set(x, r, PAL['u'])
+    for r in range(wall_top, wall_bot + 1, 4):
+        course_idx = (r - wall_top) // 4
+        course_offset = 5 if (course_idx % 2) else 0
+        first = (course_offset - cx) % 10
+        if first > 0:
+            first -= 10
+        for sx in range(first, w, 10):
+            for dy in range(0, 4):
+                yy = r + dy
+                if yy <= wall_bot:
+                    fb.set(sx, yy, PAL['u'])
+
+
+def _draw_wall_servers(fb, cx, wall_top, wall_bot):
+    """Level 2: rows of server racks. Each rack unit is 16 wide x 4 tall
+    with a darker frame, two LED status lights, and a thin vent grille
+    along the bottom. Wires hang from the ceiling at sparse intervals."""
+    w = fb.w
+    rack_w = 16
+    # Horizontal rack rows every 4 px
+    for r in range(wall_top + 1, wall_bot + 1, 4):
+        for x in range(w):
+            fb.set(x, r, PAL['u'])
+    # Per-rack frame edges (vertical seams) + LEDs
+    first = -(cx % rack_w)
+    for sx in range(first, w + rack_w, rack_w):
+        for r in range(wall_top + 1, wall_bot + 1, 4):
+            # left/right rack edges
+            if 0 <= sx < w:
+                for dy in range(1, 4):
+                    yy = r + dy
+                    if yy <= wall_bot:
+                        fb.set(sx, yy, PAL['u'])
+            # green status LED 3 px in from the left
+            led_x = sx + 3
+            if 0 <= led_x < w:
+                yy = r + 1
+                if yy <= wall_bot:
+                    fb.set(led_x, yy, (110, 240, 110))
+            # red status LED 6 px in
+            led2_x = sx + 6
+            if 0 <= led2_x < w:
+                yy = r + 1
+                if yy <= wall_bot:
+                    fb.set(led2_x, yy, (255, 110, 110))
+    # Hanging wires: a few thin vertical lines drooping from the top of
+    # the wall. Deterministic per (rack_w * world_x).
+    rng = random.Random(0xCAB1)
+    wires = []
+    for _ in range(20):
+        wires.append((rng.randint(0, 24000),
+                      rng.randint(8, 22),       # length
+                      rng.choice([(40, 40, 50), (60, 50, 30), (60, 30, 30)])))
+    for world_x, length, color in wires:
+        sx = (world_x - cx) % (w + 32) - 16   # tile horizontally with margin
+        if 0 <= sx < w:
+            for dy in range(length):
+                yy = wall_top + dy
+                if yy <= wall_bot:
+                    fb.set(sx, yy, color)
+            # dangling connector at the bottom of the wire
+            conn_y = wall_top + length
+            if conn_y <= wall_bot:
+                fb.set(sx - 1, conn_y, color)
+                fb.set(sx + 1, conn_y, color)
+
+
+def _draw_wall_desks(fb, cx, wall_top, wall_bot, ground_y):
+    """Level 3: a row of office cubicles with monitors at desk height.
+    The 'desk row' sits along the back wall above the floor."""
+    w = fb.w
+    # Faint horizontal cubicle separators every 5 px (subtle texture)
+    for r in range(wall_top + 2, wall_bot, 5):
+        for x in range(0, w, 2):
+            fb.set(x, r, PAL['u'])
+    # Vertical cubicle dividers every 24 px
+    cube_w = 24
+    first = -(cx % cube_w)
+    for sx in range(first, w + cube_w, cube_w):
+        if 0 <= sx < w:
+            for yy in range(wall_top + 1, wall_bot + 1):
+                fb.set(sx, yy, PAL['u'])
+    # Monitors: place one near desk-height inside each cubicle
+    desk_y = ground_y - 18    # monitors sit ~18 px above the floor
+    monitor_w = 9
+    monitor_h = 7
+    for sx in range(first, w + cube_w, cube_w):
+        mx = sx + (cube_w - monitor_w) // 2
+        if -monitor_w <= mx < w + monitor_w:
+            # bezel
+            for ix in range(monitor_w):
+                for iy in range(monitor_h):
+                    px = mx + ix
+                    py = desk_y + iy
+                    if 0 <= px < w and wall_top <= py <= wall_bot:
+                        if ix == 0 or ix == monitor_w - 1 \
+                                or iy == 0 or iy == monitor_h - 1:
+                            fb.set(px, py, (40, 40, 50))   # bezel dark grey
+                        else:
+                            # phosphor screen with a few bright pixels
+                            base = (35, 90, 35)
+                            fb.set(px, py, base)
+            # a few "code" pixels on the monitor face
+            rng = random.Random((sx + cx * 17) & 0xFFFF)
+            for _ in range(4):
+                ix = rng.randint(1, monitor_w - 2)
+                iy = rng.randint(1, monitor_h - 2)
+                px = mx + ix
+                py = desk_y + iy
+                if 0 <= px < w and wall_top <= py <= wall_bot:
+                    fb.set(px, py, (140, 255, 140))
+            # monitor stand
+            stand_x = mx + monitor_w // 2
+            for iy in range(monitor_h, monitor_h + 2):
+                py = desk_y + iy
+                if 0 <= stand_x < w and wall_top <= py <= wall_bot:
+                    fb.set(stand_x, py, (60, 60, 70))
 
 
 def lerp_rgb(a, b, t):
@@ -1535,7 +1686,7 @@ class World:
 # ===================================================================
 def render_world(fb, world):
     fb.clear(PAL['k'])
-    ground_y, wall_top, wall_bot = draw_background(fb, world.camera_x)
+    ground_y, wall_top, wall_bot = draw_background(fb, world.camera_x, world.level)
     if ground_y != world.ground_y:
         world.update_layout(fb.w, fb.h, ground_y)
 
@@ -1562,29 +1713,33 @@ def render_world(fb, world):
         if sx1 < fb.w:
             fb.set(sx1, ground_y, PAL['h'])
 
-    # Torches sprinkled along the back wall, in world coords.
-    torch_h = len(TORCH)
-    torch_w = len(TORCH[0])
-    for tx_w in world.torches:
-        sx = tx_w - cx
-        if -torch_w <= sx < fb.w + torch_w:
-            ty = wall_top + 4
-            # glow halo (drawn before torch so it sits behind)
-            for d in range(5):
-                rr = 6 - d
-                for dx in range(-rr, rr + 1):
-                    fb.set(sx + 2 + dx, ty + d - 2, PAL['j'])
-            fb.blit_sprite(TORCH, sx, ty)
+    # Torches sprinkled along the back wall (level 1 only -- the indoor
+    # levels have rack LEDs / monitors providing their own ambience).
+    if world.level == 1:
+        torch_h = len(TORCH)
+        torch_w = len(TORCH[0])
+        for tx_w in world.torches:
+            sx = tx_w - cx
+            if -torch_w <= sx < fb.w + torch_w:
+                ty = wall_top + 4
+                for d in range(5):
+                    rr = 6 - d
+                    for dx in range(-rr, rr + 1):
+                        fb.set(sx + 2 + dx, ty + d - 2, PAL['j'])
+                fb.blit_sprite(TORCH, sx, ty)
 
-    # Obstacles: stack of CRATE sprites
-    crate_h = len(CRATE)
-    crate_w = len(CRATE[0])
+    # Obstacles: stack of sprites. Sprite changes per level (crate / server
+    # rack / office chair) but the collision footprint stays the same.
+    obstacle_sprite = (CRATE if world.level == 1
+                       else SERVER_RACK if world.level == 2
+                       else OFFICE_CHAIR)
+    crate_h = len(obstacle_sprite)
     for ox, oy, ow, oh in world.obstacles:
         sx = ox - cx
         if -ow <= sx < fb.w + ow:
             n = oh // crate_h
             for i in range(n):
-                fb.blit_sprite(CRATE, sx, oy + i * crate_h)
+                fb.blit_sprite(obstacle_sprite, sx, oy + i * crate_h)
 
     # Floppy disks (collectibles)
     for f in world.floppies:
@@ -1903,16 +2058,35 @@ def _generate_sfx_wav(spec, path):
                 v = VOL if (i % period) < half else -VOL
                 samples[idx] = max(-32767, min(32767, int(v * env)))
     elif mode == "buzz":
-        # Continuous, looping rotor buzz. Square wave carrier with a
-        # gentle 25 Hz AM. Volume capped lower because this loops while
-        # the drone is on screen.
-        f = f0
-        period = max(2, int(round(SR / f)))
-        half = period // 2
+        # Drone propeller, designed to actually sound like a quadcopter:
+        #
+        #   - 90 Hz fundamental + 100 Hz slightly-detuned partner. The 10 Hz
+        #     beat between them gives the chopping motor texture you hear
+        #     when standing near a real drone.
+        #   - 270 Hz harmonic for the high whine of the rotor blades.
+        #   - 1-pole low-passed white noise for air rush.
+        #   - Blade-pass envelope: an exponential thump every 1/90 s, so
+        #     the sound has 90 Hz "wapwapwap" rhythm sitting on top of
+        #     the harmonic content.
+        #
+        # All component frequencies (90/100/270) divide evenly into 0.5 s
+        # so the loop is seamless.
+        rng = random.Random(0xD0CE)
+        noise_lpf = 0.0
+        f1, f2, f3 = 90.0, 100.0, 270.0
+        blade_rate = 90.0
         for i in range(n):
-            am = 0.6 + 0.4 * abs(math.sin(2 * math.pi * 25 * i / SR))
-            v = VOL if (i % period) < half else -VOL
-            samples[i] = max(-32767, min(32767, int(v * am * 0.40)))
+            t = i / SR
+            s1 = math.sin(2 * math.pi * f1 * t)
+            s2 = math.sin(2 * math.pi * f2 * t)
+            s3 = math.sin(2 * math.pi * f3 * t)
+            raw = rng.uniform(-1.0, 1.0)
+            noise_lpf += (raw - noise_lpf) * 0.20    # LPF for 'air rush'
+            blade_phase = (t * blade_rate) % 1.0
+            blade_env = 0.45 + 0.55 * math.exp(-blade_phase * 5.0)
+            sig = (s1 * 0.32 + s2 * 0.24 + s3 * 0.14
+                   + noise_lpf * 0.20) * blade_env
+            samples[i] = max(-32767, min(32767, int(sig * 22000)))
     else:  # 'down' (or 'up') -- linear pitch glide
         for i in range(n):
             t = i / max(1, n - 1)
@@ -1948,7 +2122,9 @@ def init_audio():
             _MUSIC_PATH = None
     # SFX
     for name, spec in SFX_SPECS.items():
-        path = os.path.join(tmp, f"rm_rf_em_all_sfx_{name}.wav")
+        # v2 -- bumped when the drone synth changed; older files in temp
+        # are for the older square-wave buzz and we want to regenerate.
+        path = os.path.join(tmp, f"rm_rf_em_all_sfx_{name}_v2.wav")
         if not os.path.exists(path):
             try:
                 _generate_sfx_wav(spec, path)

@@ -279,10 +279,10 @@ PAL = {
     # Boss-specific colors. These keys aren't used by anything that gets
     # retinted by level themes, so each boss keeps its own look across
     # all three palettes.
-    # JABBA blob (level 1 boss): green-yellow slug
-    '+': (190, 215, 100),        # jabba light
-    '-': (140, 165,  70),        # jabba shadow
-    '?': (230, 240, 150),        # jabba highlight
+    # JOBBA blob (level 1 boss): green-yellow slug
+    '+': (190, 215, 100),        # jobba light
+    '-': (140, 165,  70),        # jobba shadow
+    '?': (230, 240, 150),        # jobba highlight
     # CABLE BUNDLE (level 2 boss): black wires with bristling RAM sticks
     '0': ( 25,  25,  30),        # cable black
     '1': ( 60,  60,  70),        # cable mid
@@ -521,7 +521,7 @@ def _rect(rows, x0, y0, w, h, ch):
                 rows[y][x] = ch
 
 
-def _build_jabba():
+def _build_jobba():
     """Level 1 boss: bulbous green-yellow slug with a tiny head."""
     rows = [['.'] * BOSS_W for _ in range(BOSS_H)]
     # Big oval body taking up the bottom 2/3
@@ -651,10 +651,10 @@ def _build_office_manager():
     return [''.join(r) for r in rows]
 
 
-JABBA_BOSS         = _build_jabba()
+JOBBA_BOSS         = _build_jobba()
 CABLE_BUNDLE_BOSS  = _build_cable_bundle()
 OFFICE_MANAGER_BOSS = _build_office_manager()
-BOSS_SPRITES = {1: JABBA_BOSS, 2: CABLE_BUNDLE_BOSS, 3: OFFICE_MANAGER_BOSS}
+BOSS_SPRITES = {1: JOBBA_BOSS, 2: CABLE_BUNDLE_BOSS, 3: OFFICE_MANAGER_BOSS}
 
 # 4x6 torch (wall sconce)
 TORCH = [

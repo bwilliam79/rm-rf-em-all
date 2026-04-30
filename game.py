@@ -9,6 +9,7 @@ a small internal surface (160x80) and scale up with nearest-neighbor.
 """
 
 import array
+import math
 import os
 import random
 import sys
@@ -188,10 +189,9 @@ PAL = {
     '!': ( 80,  90, 110),        # drone body shadow / window
     'Q': (235, 240, 250),        # rotor blade highlight
 
-    # boss (overlord) -- darker, bigger, badder
-    'U': (110,  20,  90),        # boss outline (dark purple)
-    'u': (170,  60, 140),        # boss skin (purple)
-    'I': (220,  90, 200),        # boss highlight (pink)
+    # boss (overlord) -- only the HP-bar accent is needed since the
+    # sprite itself is a runtime-tinted ENEMY surface (see _get_overlord_surface).
+    'I': (220,  90, 200),        # phosphor pink (boss HP bar)
 }
 
 # ===================================================================
@@ -295,18 +295,25 @@ POWERUP_RAPID = [
     ".ZZZ.",
 ]
 
-# 10x4 delivery drone (two animation frames; rotor blades shimmer)
+# 12x6 delivery quadcopter. Top + bottom rotors with horizontal arms;
+# the body in the middle has two "camera" eyes. Two animation frames
+# alternate the rotor blade orientation so they look like they're
+# spinning.
 DRONE_A = [
-    "Q$$$$$$$$Q",
-    ".$$$$$$$$.",
-    ".$$!!!!$$.",
-    ".$$$$$$$$.",
+    "QQ........QQ",
+    ".QQ......QQ.",
+    "..$$$$$$$$..",
+    "..$$U..U$$..",
+    ".QQ......QQ.",
+    "QQ........QQ",
 ]
 DRONE_B = [
-    "$Q$$$$$$Q$",
-    ".$$$$$$$$.",
-    ".$$!!!!$$.",
-    ".$$$$$$$$.",
+    ".QQ......QQ.",
+    "QQ........QQ",
+    "..$$$$$$$$..",
+    "..$$U..U$$..",
+    "QQ........QQ",
+    ".QQ......QQ.",
 ]
 
 # 5x5 weapon crate (color is set in render based on kind)
@@ -598,33 +605,40 @@ def lerp_rgb(a, b, t):
 # World
 # ===================================================================
 class Pellet:
-    __slots__ = ("x", "y", "vx", "alive", "pierce")
+    """A slingshot pellet. Tracks which targets THIS pellet has already
+    hit so we never double-damage a single target with one PIERCE round.
+    We track on the pellet (which is short-lived) instead of on the
+    enemy/boss to avoid CPython's id() reuse bug -- when a pellet
+    dies and is GC'd, its id() can be assigned to a new pellet, which
+    would then be erroneously filtered as 'already hit' by a target's
+    set."""
+    __slots__ = ("x", "y", "vx", "alive", "pierce", "hit_targets")
     def __init__(self, x, y, vx, pierce=False):
         self.x = x
         self.y = y
         self.vx = vx
         self.alive = True
-        self.pierce = pierce  # if True, doesn't despawn on hit (Contra L gun)
+        self.pierce = pierce
+        self.hit_targets = set()   # ids of enemies/boss this pellet has hit
 
 
 class Enemy:
     """A red ghoul. Moves at vx px/sec (signed -> direction). Reverses
     direction when it would step into a crate or fall into a gap."""
-    __slots__ = ("x", "y", "vx", "hp", "alive", "anim_t", "hit_set")
+    __slots__ = ("x", "y", "vx", "hp", "alive", "anim_t")
     def __init__(self, x, y, vx):
         self.x = x
         self.y = y
-        self.vx = vx        # px/sec; negative = walking left, positive = right
+        self.vx = vx
         self.hp = 1
         self.alive = True
         self.anim_t = 0.0
-        self.hit_set = set()   # ids of pellets already counted vs this ghoul (for PIERCE)
 
 
 class Boss:
     """The OVERLORD. Bigger, slower, multi-HP. Spawns once you near the
     right edge of the world; must die in addition to the 8 ghouls."""
-    __slots__ = ("x", "y", "vx", "hp", "alive", "anim_t", "flash_until", "hit_set")
+    __slots__ = ("x", "y", "vx", "hp", "alive", "anim_t", "flash_until")
     def __init__(self, x, y, vx):
         self.x = x
         self.y = y
@@ -632,8 +646,7 @@ class Boss:
         self.hp = BOSS_HP
         self.alive = True
         self.anim_t = 0.0
-        self.flash_until = 0.0   # render briefly white when hit
-        self.hit_set = set()
+        self.flash_until = 0.0
 
 
 class Drone:
@@ -1145,14 +1158,14 @@ class World:
             for p in self.pellets:
                 if not p.alive:
                     continue
-                if id(p) in e.hit_set:
+                if id(e) in p.hit_targets:
                     continue
                 if (e.x - 1 <= p.x <= e.x + 12
                         and e.y - 1 <= p.y <= e.y + 16):
                     e.alive = False
+                    p.hit_targets.add(id(e))
                     if not p.pierce:
                         p.alive = False
-                    e.hit_set.add(id(p))
                     self.kills += 1
                     self.message = random.choice(KILL_TAUNTS)
                     self.message_until = time.time() + 1.4
@@ -1257,17 +1270,19 @@ class World:
             else:
                 b.x = new_bx
             b.anim_t += dt
-            # Pellets damage the boss
+            # Pellets damage the boss. Use p.hit_targets so PIERCE rounds
+            # only count each enemy/boss once even though they survive
+            # the impact.
             for p in self.pellets:
                 if not p.alive:
                     continue
-                if id(p) in b.hit_set:
+                if id(b) in p.hit_targets:
                     continue
                 if (b.x - 2 <= p.x <= b.x + BOSS_W + 2
                         and b.y + 4 <= p.y <= b.y + BOSS_H):
                     b.hp -= 1
                     b.flash_until = time.time() + 0.10
-                    b.hit_set.add(id(p))
+                    p.hit_targets.add(id(b))
                     if not p.pierce:
                         p.alive = False
                     play("hit")
@@ -1438,19 +1453,25 @@ def render_world(fb, world):
             fb.set(spx + dx, py + dy, glow)
         fb.fill_rect(spx, py, 2, 2, core)
 
-    # Delivery drones (drawn after game entities so they hover overhead)
+    # Delivery drones (drawn after game entities so they hover overhead).
+    # Bob the drone +-2 px on a 1.5 Hz sine so it reads as flying, not
+    # gliding on a rail.
     for d in world.drones:
         if not d.alive:
             continue
         sx = int(d.x) - cx
-        if -10 <= sx < fb.w + 10:
-            frame = DRONE_A if int(d.anim_t * 12) % 2 == 0 else DRONE_B
-            fb.blit_sprite(frame, sx, int(d.y))
+        if -12 <= sx < fb.w + 12:
+            frame = DRONE_A if int(d.anim_t * 14) % 2 == 0 else DRONE_B
+            bob = int(round(2 * math.sin(d.anim_t * 9.0)))
+            dy = int(d.y) + bob
+            fb.blit_sprite(frame, sx, dy)
             # cable + dangling crate while still carrying
             if d.state == "approaching":
-                fb.set(sx + 4, int(d.y) + 4, PAL['$'])
-                fb.set(sx + 4, int(d.y) + 5, PAL['$'])
-                fb.blit_sprite(WEAPON_CRATE, sx + 2, int(d.y) + 6)
+                fb.set(sx + 5, dy + 6, PAL['$'])
+                fb.set(sx + 5, dy + 7, PAL['$'])
+                fb.set(sx + 6, dy + 6, PAL['$'])
+                fb.set(sx + 6, dy + 7, PAL['$'])
+                fb.blit_sprite(WEAPON_CRATE, sx + 3, dy + 8)
 
     # HUD bar (top). Stat is left-aligned, weapon timer right-aligned.
     hud_h = 9

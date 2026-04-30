@@ -152,6 +152,27 @@ KILL_TAUNTS = [
     "EOF, buddy.",
 ]
 
+# Pancakes mode taunts. The ghouls are gone; what remains are little
+# black-and-white memorial Frenchies you say hello to. In honor of
+# Pancake Waffles -- a very good boy.
+PANCAKES_TAUNTS = [
+    "Pancakes loves you.",
+    "A wag for the road.",
+    "Pancake Waffles approves.",
+    "Boop! Right on the snoot.",
+    "He says hi, friend.",
+    "Forever a good boy.",
+    "All the head pats.",
+    "Snuggle delivered.",
+    "Bork: 'I love you.'",
+    "He's so proud of you.",
+    "Tail wags from beyond.",
+    "You earned a slobbery kiss.",
+    "Treat received with love.",
+    "Belly rub achievement.",
+    "Best buddy, always.",
+]
+
 WIN_QUOTES = [
     "All enemies uninstalled. Ship it.",
     "Exit code 0. You are the root user now.",
@@ -470,41 +491,44 @@ LEVEL_ENEMIES = {
 # logic mirrors it when walking left). Tail nub on the left, head +
 # bat ears on the right, long flat back between them, white chest
 # patch under the throat, two visible legs.
+# Refined side-profile Frenchie: distinct head with a hint of smushed
+# snout, single bright eye, a small white chest patch under the throat,
+# barrel body, four short legs, and the iconic upright bat ears.
 FRENCHIE_A = [
-    "........b.b.",   # 0:  ear tips on the head
-    ".......bbbb.",   # 1:  ears 4 wide
-    "......bbbbb.",   # 2:  ears tapering toward the head
-    "..b...bbbbbb",   # 3:  tail nub (col 2) + head + snout (cols 6-11)
-    ".bb..bbbb8bb",   # 4:  tail base + face with eye highlight (8)
-    "bbbbbbbbbbbb",   # 5:  long flat back
-    "bbbbbbbbbbbb",   # 6:  body
-    "bbbbbbb8888b",   # 7:  WHITE CHEST PATCH at the front
+    "........b.b.",   # 0:  ear tips (small triangular points)
+    ".......bbbbb",   # 1:  ears widening
+    "......bbbbb.",   # 2:  ear bases tapering down to head
+    ".....bbbbbbb",   # 3:  head meets ears, snout starts (cols 5-11)
+    "....bbbb8bbb",   # 4:  face with bright eye (8 = white highlight)
+    "....bbbbbbb.",   # 5:  jaw / mouth area (slightly tucked under)
+    "...bbbbbbbb.",   # 6:  neck curving into the shoulders
+    "bbbbbbbbbbbb",   # 7:  shoulders + long back (full row)
     "bbbbbbbbbbbb",   # 8:  body
-    "bbbbbbbbbbbb",   # 9:  body bottom
-    "............",   # 10: leg gap
-    ".bb...bbb...",   # 11: rear leg (left) + front leg (right, thicker)
-    ".bb...bbb...",   # 12: legs
-    ".bb...bbb...",   # 13: legs
-    ".ii...iii...",   # 14: paws
-    "............",   # 15: ground
+    "bbbbbb8888bb",   # 9:  WHITE CHEST PATCH (front of belly)
+    "bbbbbbbbbbbb",   # 10: body bottom
+    "............",   # 11: leg gap
+    ".bb...bbb...",   # 12: rear leg (slim) + front leg (thicker, closer)
+    ".bb...bbb...",   # 13: legs continued
+    ".bb...bbb...",   # 14: legs
+    ".ii...iii...",   # 15: paws
 ]
 FRENCHIE_B = [
     "........b.b.",
-    ".......bbbb.",
+    ".......bbbbb",
     "......bbbbb.",
-    "..b...bbbbbb",
-    ".bb..bbbb8bb",
+    ".....bbbbbbb",
+    "....bbbb8bbb",
+    "....bbbbbbb.",
+    "...bbbbbbbb.",
     "bbbbbbbbbbbb",
     "bbbbbbbbbbbb",
-    "bbbbbbb8888b",
-    "bbbbbbbbbbbb",
+    "bbbbbb8888bb",
     "bbbbbbbbbbbb",
     "............",
-    ".bbb...bb...",   # rear thicker, front slimmer (weight shifted = walk)
+    ".bbb...bb...",   # weight shifted (rear thicker, front slimmer)
     ".bbb...bb...",
     ".bbb...bb...",
     ".iii...ii...",
-    "............",
 ]
 
 # 5x5 heart pellet for Pancakes. 'R' is rubber-band red (always defined,
@@ -1915,11 +1939,16 @@ class World:
                     if not p.pierce:
                         p.alive = False
                     self.kills += 1
-                    self.message = random.choice(KILL_TAUNTS)
+                    # Pancakes: warm tributes to Pancake Waffles instead of
+                    # the technical kill taunts. The Frenchie also yips
+                    # happily instead of the regular kill bling.
+                    if self.pancakes_mode:
+                        self.message = random.choice(PANCAKES_TAUNTS)
+                        play("bark")
+                    else:
+                        self.message = random.choice(KILL_TAUNTS)
+                        play("kill")
                     self.message_until = time.time() + 1.4
-                    # Pancakes: a Frenchie hit with a heart yips happily
-                    # instead of the regular kill sound effect.
-                    play("bark" if self.pancakes_mode else "kill")
                     self._maybe_send_drone(e.x, e.y)
                     break
             # touch player (full bbox so jumping clears them)
@@ -2508,39 +2537,29 @@ def _generate_sfx_wav(spec, path):
                 v = VOL if (i % period) < half else -VOL
                 samples[idx] = max(-32767, min(32767, int(v * env)))
     elif mode == "bark":
-        # Happy 'arf' bark. Layered sine harmonics (fundamental + 2nd
-        # + 3rd) with a brief noise burst at the attack of each bark
-        # for the consonant 'rf' sound. Sounds way more like a small
-        # dog than the previous square-wave glide.
-        rng = random.Random(0xB1A8)
+        # Two-note happy chime (B5 -> E6, perfect 4th up). Pure sine +
+        # gentle 2nd-harmonic warmth, no noise, no glides. Plays like a
+        # phone notification ping. Two prior synths got progressively
+        # worse trying to imitate a dog vocally; this one stops trying
+        # and just sounds nice.
+        note1 = 988.0    # B5
+        note2 = 1318.0   # E6 -- perfect 4th up, the universally-happy
+                         # interval ('Here Comes the Bride' opener, etc.)
         for i in range(n):
-            progress = i / max(1, n - 1)
-            # Two arfs: 0-35% first, 35-50% silence, 50-100% second
-            if progress < 0.35:
-                p = progress / 0.35
-                freq = f0 - (f0 - f1) * p
-                env = (1.0 - p) ** 0.55
-                attack_noise = max(0.0, 1.0 - p / 0.10)   # noise burst at attack
-            elif progress < 0.50:
+            p = i / max(1, n - 1)
+            if p < 0.30:
+                freq = note1
+                env = max(0.0, 1.0 - p / 0.30) ** 0.4
+            elif p < 0.42:
                 samples[i] = 0
                 continue
             else:
-                p = (progress - 0.50) / 0.50
-                freq = (f0 * 0.85) - ((f0 * 0.85) - (f1 * 0.85)) * p
-                env = (1.0 - p) ** 0.55
-                attack_noise = max(0.0, 1.0 - p / 0.10)
+                freq = note2
+                env = max(0.0, 1.0 - (p - 0.42) / 0.58) ** 0.4
             t = i / SR
-            # Vibrato (~25 Hz) on the fundamental for organic feel
-            vib = 1.0 + 0.04 * math.sin(2 * math.pi * 25 * t)
-            f = freq * vib
-            tone = (
-                math.sin(2 * math.pi * f * t)        * 0.55 +
-                math.sin(2 * math.pi * f * 2 * t)    * 0.25 +
-                math.sin(2 * math.pi * f * 3 * t)    * 0.15
-            )
-            noise = rng.uniform(-1.0, 1.0) * attack_noise * 0.45
-            sample = (tone + noise) * env
-            samples[i] = max(-32767, min(32767, int(sample * 22000)))
+            sample = (math.sin(2 * math.pi * freq * t) * 0.70 +
+                      math.sin(2 * math.pi * freq * 2 * t) * 0.20)
+            samples[i] = max(-32767, min(32767, int(sample * env * 22000)))
     elif mode == "buzz":
         # Drone propeller, designed to actually sound like a quadcopter:
         #
@@ -2618,9 +2637,9 @@ def init_audio():
             _MUSIC_PATH = None
     # SFX
     for name, spec in SFX_SPECS.items():
-        # v3 -- bumped when the bark synth was rewritten as harmonic sines
-        # (the v2 square-wave bark was rough). Old files get superseded.
-        path = os.path.join(tmp, f"rm_rf_em_all_sfx_{name}_v3.wav")
+        # v4 -- bumped again. The v3 sine-harmonic bark still sounded
+        # off, so it's been replaced with a clean two-note ping.
+        path = os.path.join(tmp, f"rm_rf_em_all_sfx_{name}_v4.wav")
         if not os.path.exists(path):
             try:
                 _generate_sfx_wav(spec, path)

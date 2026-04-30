@@ -108,10 +108,10 @@ delivery drone that drops a Contra-style weapon crate:
 ## How to uninstall
 
 ```bash
-rm -rf 'em all
+rm -rf rm-rf-em-all
 ```
 
-(It is literally in the name.)
+(The project literally rm -rf's itself. The name was a promise.)
 
 ## Status
 

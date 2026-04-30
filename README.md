@@ -90,11 +90,6 @@ chicken out.
 | `Q` or `Esc`       | Quit                  |
 | `Up`               | (reserved for future ladders / vertical movement) |
 
-### Easter eggs
-
-- `python3 game.py --pancakes` -- **Pancakes**: enemies become black-and-white
-  French bulldogs and the slingshot fires hearts instead of pellets.
-
 ## How to win
 
 Kill every ghoul (`X` to fire), then put down the **OVERLORD** that

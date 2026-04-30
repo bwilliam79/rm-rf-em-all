@@ -491,44 +491,51 @@ LEVEL_ENEMIES = {
 # logic mirrors it when walking left). Tail nub on the left, head +
 # bat ears on the right, long flat back between them, white chest
 # patch under the throat, two visible legs.
-# Refined side-profile Frenchie: distinct head with a hint of smushed
-# snout, single bright eye, a small white chest patch under the throat,
-# barrel body, four short legs, and the iconic upright bat ears.
+# Side-profile Frenchie at 16x18. Bigger than the 12x16 ENEMY collision
+# footprint (centered, paws bottom-aligned at render time) so we can
+# fit real Frenchie features: large pointy bat ears at the top of the
+# head, smushed black face with a bright eye, stocky barrel body with
+# a small white chest patch under the throat, tail nub at the rear,
+# and four short legs visible in side profile.
 FRENCHIE_A = [
-    "........b.b.",   # 0:  ear tips (small triangular points)
-    ".......bbbbb",   # 1:  ears widening
-    "......bbbbb.",   # 2:  ear bases tapering down to head
-    ".....bbbbbbb",   # 3:  head meets ears, snout starts (cols 5-11)
-    "....bbbb8bbb",   # 4:  face with bright eye (8 = white highlight)
-    "....bbbbbbb.",   # 5:  jaw / mouth area (slightly tucked under)
-    "...bbbbbbbb.",   # 6:  neck curving into the shoulders
-    "bbbbbbbbbbbb",   # 7:  shoulders + long back (full row)
-    "bbbbbbbbbbbb",   # 8:  body
-    "bbbbbb8888bb",   # 9:  WHITE CHEST PATCH (front of belly)
-    "bbbbbbbbbbbb",   # 10: body bottom
-    "............",   # 11: leg gap
-    ".bb...bbb...",   # 12: rear leg (slim) + front leg (thicker, closer)
-    ".bb...bbb...",   # 13: legs continued
-    ".bb...bbb...",   # 14: legs
-    ".ii...iii...",   # 15: paws
+    "............b.b.",   # 0:  ear tips
+    "...........bbbbb",   # 1:  ears 5 wide
+    "..........bbbbb.",   # 2:  ears tapering down toward the head
+    ".........bbbbbb.",   # 3:  ear bases settling onto the head
+    "........bbbbbbbb",   # 4:  head top
+    "........bbb8bbbb",   # 5:  bright eye highlight (col 11)
+    "........bbbbbbbb",   # 6:  forehead / smushed snout
+    ".........bbbbbb.",   # 7:  jaw / chin (slight under-curve)
+    "...bb..bbbbbbbbb",   # 8:  tail nub on the left + neck/shoulders
+    "..bbbbbbbbbbbbbb",   # 9:  back of body
+    ".bbbbbbbbbbbbbbb",   # 10: barrel body
+    "bbbbbbbbbbb8888b",   # 11: WHITE CHEST PATCH (front of body, near throat)
+    "bbbbbbbbbbbbbbbb",   # 12: body
+    ".bbbbbbbbbbbbbbb",   # 13: body bottom (curving back in)
+    "................",   # 14: leg gap
+    "..bb.....bbb....",   # 15: rear leg (slim) + front leg (thicker, closer)
+    "..bb.....bbb....",   # 16: legs continued
+    "..ii.....iii....",   # 17: paws
 ]
 FRENCHIE_B = [
-    "........b.b.",
-    ".......bbbbb",
-    "......bbbbb.",
-    ".....bbbbbbb",
-    "....bbbb8bbb",
-    "....bbbbbbb.",
-    "...bbbbbbbb.",
-    "bbbbbbbbbbbb",
-    "bbbbbbbbbbbb",
-    "bbbbbb8888bb",
-    "bbbbbbbbbbbb",
-    "............",
-    ".bbb...bb...",   # weight shifted (rear thicker, front slimmer)
-    ".bbb...bb...",
-    ".bbb...bb...",
-    ".iii...ii...",
+    "............b.b.",
+    "...........bbbbb",
+    "..........bbbbb.",
+    ".........bbbbbb.",
+    "........bbbbbbbb",
+    "........bbb8bbbb",
+    "........bbbbbbbb",
+    ".........bbbbbb.",
+    "...bb..bbbbbbbbb",
+    "..bbbbbbbbbbbbbb",
+    ".bbbbbbbbbbbbbbb",
+    "bbbbbbbbbbb8888b",
+    "bbbbbbbbbbbbbbbb",
+    ".bbbbbbbbbbbbbbb",
+    "................",
+    ".bbb.....bb.....",   # weight shifted: rear thicker, front slimmer
+    ".bbb.....bb.....",
+    ".iii.....ii.....",
 ]
 
 # 5x5 heart pellet for Pancakes. 'R' is rubber-band red (always defined,
@@ -1337,6 +1344,16 @@ class WeaponCrate:
         self.claimed = False
 
 
+class FloatingHeart:
+    """A small heart sprite that drifts upward and fades out -- spawned
+    when the player gets bumped by a Frenchie in Pancakes mode."""
+    __slots__ = ("x", "y", "lifetime")
+    def __init__(self, x, y):
+        self.x = float(x)
+        self.y = float(y)
+        self.lifetime = 1.4    # seconds until despawn
+
+
 class SSLCert:
     """A golden 7x9 padlock that drops when the boss dies. Walking over
     it advances the level (or wins the game on the final level)."""
@@ -1400,6 +1417,9 @@ class World:
         # Pancakes: cosmetic flag that swaps enemies for French bulldogs
         # and pellets for hearts. Set externally after construction.
         self.pancakes_mode = False
+        # Floating hearts spawned when a Frenchie bumps the player in
+        # Pancakes mode (visual feedback in lieu of 'ouch').
+        self.floating_hearts = []
         # disks collected count (total floppies set by _gen_level)
         self.disks = 0
         self.disks_total = 0
@@ -1966,7 +1986,19 @@ class World:
                         self.last_hit = time.time()
                         play("hit")
                         e.alive = False
-                        self.message = "You took a hit!"
+                        # The collision didn't count as a kill, so decrement
+                        # spawned to allow a replacement enemy. Without this
+                        # the kill quota becomes unreachable if enough enemies
+                        # bodyslam the player.
+                        self.spawned = max(0, self.spawned - 1)
+                        if self.pancakes_mode:
+                            # Pancakes hits release a floating heart -- "she
+                            # bumped you" energy, not "ouch."
+                            self.floating_hearts.append(FloatingHeart(
+                                self.player_x + 6, self.player_y + 4))
+                            self.message = "Pancakes bumped you!"
+                        else:
+                            self.message = "You took a hit!"
                         self.message_until = time.time() + 1.0
         # Despawn enemies whose footing has gone out from under them. This
         # covers two cases:
@@ -2062,6 +2094,12 @@ class World:
                     if c.y > self.fb_h + 20:
                         c.claimed = True   # treat as gone
         self.weapon_crates = [c for c in self.weapon_crates if not c.claimed]
+
+        # ---- floating hearts (Pancakes feedback when player gets bumped) ----
+        for h in self.floating_hearts:
+            h.y -= 28.0 * dt          # rise at 28 px/sec
+            h.lifetime -= dt
+        self.floating_hearts = [h for h in self.floating_hearts if h.lifetime > 0]
 
         # ---- boss: spawn once the player nears the right edge ----
         if (self.boss is None
@@ -2262,23 +2300,37 @@ def render_world(fb, world):
 
     # Enemies (back to front by world x). Sprite varies by level:
     # ghouls (L1), CPUs (L2), Karens (L3). Pancakes replaces all of
-    # them with black-and-white French bulldogs.
+    # them with French bulldogs at a larger 16x18 size, centered on
+    # the 12x16 collision box.
     if world.pancakes_mode:
         enemy_a, enemy_b = FRENCHIE_A, FRENCHIE_B
+        sprite_x_offset = -(len(FRENCHIE_A[0]) - len(ENEMY_A[0])) // 2  # -2
+        sprite_y_offset = -(len(FRENCHIE_A) - len(ENEMY_A))             # -2
     else:
         enemy_a, enemy_b = LEVEL_ENEMIES.get(world.level, (ENEMY_A, ENEMY_B))
+        sprite_x_offset = 0
+        sprite_y_offset = 0
     for e in sorted(world.enemies, key=lambda e: -e.x):
         if not e.alive:
             continue
         sx = int(e.x) - cx
-        if -16 <= sx < fb.w + 16:
+        if -20 <= sx < fb.w + 20:
             frame = enemy_a if int(e.anim_t * 6) % 2 == 0 else enemy_b
-            fb.blit_sprite(frame, sx, int(e.y), flip=(e.vx < 0))
+            fb.blit_sprite(frame, sx + sprite_x_offset,
+                           int(e.y) + sprite_y_offset,
+                           flip=(e.vx < 0))
 
     # Player
     psx = int(world.player_x) - cx
     fb.blit_sprite(NERD, psx, int(world.player_y),
                    flip=not world.player_face_right)
+
+    # Floating hearts (Pancakes mode) -- they rise from the player when
+    # a Frenchie bumps her (sic).
+    for h in world.floating_hearts:
+        hx = int(h.x) - cx
+        if -8 <= hx < fb.w + 8:
+            fb.blit_sprite(HEART, hx - 2, int(h.y))
 
     # Pellets. Pancakes renders a heart sprite; everyone else gets the
     # 2x2 ball + glow + trailing streak (PIERCE rounds use a red core).

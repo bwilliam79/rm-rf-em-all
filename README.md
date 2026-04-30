@@ -92,7 +92,7 @@ chicken out.
 
 ### Easter eggs
 
-- `python3 game.py --evan` -- **Evan Mode**: enemies become black-and-white
+- `python3 game.py --pancakes` -- **Pancakes**: enemies become black-and-white
   French bulldogs and the slingshot fires hearts instead of pellets.
 
 ## How to win

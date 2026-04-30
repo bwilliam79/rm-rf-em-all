@@ -180,7 +180,7 @@ SFX_SPECS = {
     # Looping drone propeller buzz: square-wave carrier with a gentle
     # 25 Hz amplitude modulation that reads as 'rotor blades passing'.
     "drone": ((230.0, 230.0),  0.50, "buzz"),
-    # Evan Mode: a happy two-yip bark instead of the regular kill blip.
+    # Pancakes: a happy two-yip bark instead of the regular kill blip.
     "bark":  ((700.0, 320.0),  0.32, "bark"),
 }
 _SFX_CACHE = {}        # name -> pygame.mixer.Sound
@@ -460,53 +460,54 @@ LEVEL_ENEMIES = {
     3: (KAREN_A, KAREN_B),
 }
 
-# ---- EVAN MODE: black-and-white French bulldogs replace enemies, hearts
-# replace pellets. Activate with `python3 game.py --evan`. Sprite uses
+# ---- PANCAKES: black-and-white French bulldogs replace enemies, hearts
+# replace pellets. Activate with `python3 game.py --pancakes`. Sprite uses
 # 'b' (boots near-black) for spots and '8' (floppy white) for the white
 # coat -- neither is overridden by any level theme so dogs stay
 # black-and-white in all 3 worlds. 'M' is the existing mouth red,
 # perfect for tongue-out.
-# Mostly black-coated Frenchie like the reference: predominantly black
-# body with a small white chest patch and a hint of white on the snout,
-# plus the iconic pointy bat ears jutting up from a smushed black face.
+# Side-profile black Frenchie (faces right by default; existing flip
+# logic mirrors it when walking left). Tail nub on the left, head +
+# bat ears on the right, long flat back between them, white chest
+# patch under the throat, two visible legs.
 FRENCHIE_A = [
-    "...b....b...",   # 0:  ear tips (two clear single-pixel points)
-    "..bb....bb..",   # 1:  ears 2 wide
-    ".bbb....bbb.",   # 2:  ears 3 wide tapering
-    "bbbbb..bbbbb",   # 3:  ear bases blending into head sides
-    "bbbbbbbbbbbb",   # 4:  black head top
-    "bVbbbbbbbbVb",   # 5:  eye highlights (V = bright eyes on black face)
-    "bbbbbbbbbbbb",   # 6:  forehead between eyes and snout
-    "bbbbb88bbbbb",   # 7:  small white blaze on the snout
-    "bbbb8MM8bbbb",   # 8:  muzzle with tongue out (M)
-    "bbbbb88bbbbb",   # 9:  chin -- white tapers back down
-    "bbbbbbbbbbbb",   # 10: neck / shoulders solid black
-    "bbb88888bbbb",   # 11: WHITE CHEST PATCH (the iconic Frenchie tuxedo)
-    "bbbbbbbbbbbb",   # 12: barrel body
-    ".bbb..bbb...",   # 13: stocky front + back legs
-    ".bbb..bbb...",   # 14: legs continued
-    ".ii....ii...",   # 15: paws
+    "........b.b.",   # 0:  ear tips on the head
+    ".......bbbb.",   # 1:  ears 4 wide
+    "......bbbbb.",   # 2:  ears tapering toward the head
+    "..b...bbbbbb",   # 3:  tail nub (col 2) + head + snout (cols 6-11)
+    ".bb..bbbb8bb",   # 4:  tail base + face with eye highlight (8)
+    "bbbbbbbbbbbb",   # 5:  long flat back
+    "bbbbbbbbbbbb",   # 6:  body
+    "bbbbbbb8888b",   # 7:  WHITE CHEST PATCH at the front
+    "bbbbbbbbbbbb",   # 8:  body
+    "bbbbbbbbbbbb",   # 9:  body bottom
+    "............",   # 10: leg gap
+    ".bb...bbb...",   # 11: rear leg (left) + front leg (right, thicker)
+    ".bb...bbb...",   # 12: legs
+    ".bb...bbb...",   # 13: legs
+    ".ii...iii...",   # 14: paws
+    "............",   # 15: ground
 ]
 FRENCHIE_B = [
-    "...b....b...",
-    "..bb....bb..",
-    ".bbb....bbb.",
-    "bbbbb..bbbbb",
+    "........b.b.",
+    ".......bbbb.",
+    "......bbbbb.",
+    "..b...bbbbbb",
+    ".bb..bbbb8bb",
     "bbbbbbbbbbbb",
-    "bVbbbbbbbbVb",
     "bbbbbbbbbbbb",
-    "bbbbb88bbbbb",
-    "bbbb8MM8bbbb",
-    "bbbbb88bbbbb",
+    "bbbbbbb8888b",
     "bbbbbbbbbbbb",
-    "bbb88888bbbb",
     "bbbbbbbbbbbb",
-    "..bbb..bbb..",   # legs shifted right 1 for the walk frame
-    "..bbb..bbb..",
-    "..ii...ii...",
+    "............",
+    ".bbb...bb...",   # rear thicker, front slimmer (weight shifted = walk)
+    ".bbb...bb...",
+    ".bbb...bb...",
+    ".iii...ii...",
+    "............",
 ]
 
-# 5x5 heart pellet for Evan Mode. 'R' is rubber-band red (always defined,
+# 5x5 heart pellet for Pancakes. 'R' is rubber-band red (always defined,
 # never retinted), 'l' is the bright powerup core for a soft highlight.
 HEART = [
     ".R.R.",
@@ -1372,9 +1373,9 @@ class World:
         self.ssl_cert = None
         # current level (1..FINAL_LEVEL). Persists across level transitions.
         self.level = 1
-        # Evan Mode: cosmetic flag that swaps enemies for French bulldogs
+        # Pancakes: cosmetic flag that swaps enemies for French bulldogs
         # and pellets for hearts. Set externally after construction.
-        self.evan_mode = False
+        self.pancakes_mode = False
         # disks collected count (total floppies set by _gen_level)
         self.disks = 0
         self.disks_total = 0
@@ -1572,7 +1573,10 @@ class World:
         sling_x = self.player_x + (12 if self.player_face_right else 1)
         sling_y = self.player_y + 12
         sign = 1 if self.player_face_right else -1
-        vx = sign * PELLET_PX_PER_SEC
+        # Hearts (Pancakes mode) fly slower so the player can actually
+        # see what they are.
+        speed = PELLET_PX_PER_SEC * (0.5 if self.pancakes_mode else 1.0)
+        vx = sign * speed
         if kind == "SPREAD":
             # 3 pellets fanning out (~10 px/s vertical for the outer ones)
             self.pellets.append(Pellet(sling_x, sling_y, vx))
@@ -1913,9 +1917,9 @@ class World:
                     self.kills += 1
                     self.message = random.choice(KILL_TAUNTS)
                     self.message_until = time.time() + 1.4
-                    # Evan Mode: a Frenchie hit with a heart yips happily
+                    # Pancakes: a Frenchie hit with a heart yips happily
                     # instead of the regular kill sound effect.
-                    play("bark" if self.evan_mode else "kill")
+                    play("bark" if self.pancakes_mode else "kill")
                     self._maybe_send_drone(e.x, e.y)
                     break
             # touch player (full bbox so jumping clears them)
@@ -2228,9 +2232,9 @@ def render_world(fb, world):
                 fb.surface.blit(surf, (sx, int(b.y)))
 
     # Enemies (back to front by world x). Sprite varies by level:
-    # ghouls (L1), CPUs (L2), Karens (L3). Evan Mode replaces all of
+    # ghouls (L1), CPUs (L2), Karens (L3). Pancakes replaces all of
     # them with black-and-white French bulldogs.
-    if world.evan_mode:
+    if world.pancakes_mode:
         enemy_a, enemy_b = FRENCHIE_A, FRENCHIE_B
     else:
         enemy_a, enemy_b = LEVEL_ENEMIES.get(world.level, (ENEMY_A, ENEMY_B))
@@ -2247,7 +2251,7 @@ def render_world(fb, world):
     fb.blit_sprite(NERD, psx, int(world.player_y),
                    flip=not world.player_face_right)
 
-    # Pellets. Evan Mode renders a heart sprite; everyone else gets the
+    # Pellets. Pancakes renders a heart sprite; everyone else gets the
     # 2x2 ball + glow + trailing streak (PIERCE rounds use a red core).
     for p in world.pellets:
         if not p.alive:
@@ -2255,7 +2259,7 @@ def render_world(fb, world):
         spx = int(p.x) - cx
         py = int(p.y)
         sign = -1 if p.vx > 0 else 1
-        if world.evan_mode:
+        if world.pancakes_mode:
             # heart at sprite center (heart is 5x5; offset to align with
             # original 2x2 core anchor)
             fb.blit_sprite(HEART, spx - 2, py - 2)
@@ -2504,29 +2508,39 @@ def _generate_sfx_wav(spec, path):
                 v = VOL if (i % period) < half else -VOL
                 samples[idx] = max(-32767, min(32767, int(v * env)))
     elif mode == "bark":
-        # Happy two-yip Frenchie bark. f0 is the starting pitch of the
-        # first yip; the synth glides each yip down toward f1. Two yips
-        # back-to-back with a tiny pause between them.
+        # Happy 'arf' bark. Layered sine harmonics (fundamental + 2nd
+        # + 3rd) with a brief noise burst at the attack of each bark
+        # for the consonant 'rf' sound. Sounds way more like a small
+        # dog than the previous square-wave glide.
         rng = random.Random(0xB1A8)
         for i in range(n):
             progress = i / max(1, n - 1)
-            if progress < 0.40:                    # first yip
-                p = progress / 0.40
+            # Two arfs: 0-35% first, 35-50% silence, 50-100% second
+            if progress < 0.35:
+                p = progress / 0.35
                 freq = f0 - (f0 - f1) * p
-                env = (1.0 - p) ** 0.7
-            elif progress < 0.55:                  # tiny gap between yips
+                env = (1.0 - p) ** 0.55
+                attack_noise = max(0.0, 1.0 - p / 0.10)   # noise burst at attack
+            elif progress < 0.50:
                 samples[i] = 0
                 continue
-            else:                                  # second yip (slightly lower)
-                p = (progress - 0.55) / 0.45
+            else:
+                p = (progress - 0.50) / 0.50
                 freq = (f0 * 0.85) - ((f0 * 0.85) - (f1 * 0.85)) * p
-                env = (1.0 - p) ** 0.6
-            period = max(2, int(round(SR / freq)))
-            half = period // 2
-            # Slight chaos to give it vocal texture
-            chaos = rng.uniform(0.9, 1.1)
-            v = VOL if (i % period) < half else -VOL
-            samples[i] = max(-32767, min(32767, int(v * env * chaos * 0.85)))
+                env = (1.0 - p) ** 0.55
+                attack_noise = max(0.0, 1.0 - p / 0.10)
+            t = i / SR
+            # Vibrato (~25 Hz) on the fundamental for organic feel
+            vib = 1.0 + 0.04 * math.sin(2 * math.pi * 25 * t)
+            f = freq * vib
+            tone = (
+                math.sin(2 * math.pi * f * t)        * 0.55 +
+                math.sin(2 * math.pi * f * 2 * t)    * 0.25 +
+                math.sin(2 * math.pi * f * 3 * t)    * 0.15
+            )
+            noise = rng.uniform(-1.0, 1.0) * attack_noise * 0.45
+            sample = (tone + noise) * env
+            samples[i] = max(-32767, min(32767, int(sample * 22000)))
     elif mode == "buzz":
         # Drone propeller, designed to actually sound like a quadcopter:
         #
@@ -2604,9 +2618,9 @@ def init_audio():
             _MUSIC_PATH = None
     # SFX
     for name, spec in SFX_SPECS.items():
-        # v2 -- bumped when the drone synth changed; older files in temp
-        # are for the older square-wave buzz and we want to regenerate.
-        path = os.path.join(tmp, f"rm_rf_em_all_sfx_{name}_v2.wav")
+        # v3 -- bumped when the bark synth was rewritten as harmonic sines
+        # (the v2 square-wave bark was rough). Old files get superseded.
+        path = os.path.join(tmp, f"rm_rf_em_all_sfx_{name}_v3.wav")
         if not os.path.exists(path):
             try:
                 _generate_sfx_wav(spec, path)
@@ -2931,7 +2945,7 @@ def main():
     init_audio()
 
     fullscreen = "--windowed" not in sys.argv
-    evan_mode = ("--evan" in sys.argv) or ("--evan-mode" in sys.argv)
+    pancakes_mode = ("--pancakes" in sys.argv) or ("--pancakes" in sys.argv)
     screen = make_screen(fullscreen)
     clock = pygame.time.Clock()
     fb = Framebuffer(INTERNAL_W, INTERNAL_H)
@@ -2946,7 +2960,7 @@ def main():
 
         # ---- gameplay ----
         world = World(INTERNAL_W, INTERNAL_H)
-        world.evan_mode = evan_mode
+        world.pancakes_mode = pancakes_mode
         last = time.time()
         while True:
             now = time.time()
@@ -2966,7 +2980,7 @@ def main():
                 global _SPRITE_CACHE_VERSION
                 _SPRITE_CACHE_VERSION += 1
                 world = World(INTERNAL_W, INTERNAL_H)
-                world.evan_mode = evan_mode
+                world.pancakes_mode = pancakes_mode
             if world.state == "playing":
                 world.tick(dt, keys)
 

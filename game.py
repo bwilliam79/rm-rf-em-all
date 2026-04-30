@@ -835,18 +835,31 @@ class World:
         now_t = time.time()
 
         def _carry_walk_through_action():
-            """In cbreak mode macOS only auto-repeats the most recently
-            held key. While the player mashes X to shoot or holds SPACE
-            to jump, the LEFT/RIGHT auto-repeat is suspended and the hold
-            window would expire. Keep the walk going as long as the
-            player IS currently walking (hold not yet expired) -- and
-            also bump last_press_* so the next action key in the chain
-            still finds 'currently walking' true."""
+            """The fundamental problem: in cbreak mode terminals don't
+            deliver key-up events, and macOS suspends an arrow's
+            auto-repeat while a second key (X / SPACE) is held. After the
+            action key is released we cannot tell whether the user is
+            still holding the arrow or not.
+
+            Strategy: while the player IS currently walking and presses
+            an action key, extend the walk grace to ACTION_GRACE_S
+            (generous, ~1 s). If macOS resumes arrow auto-repeat after
+            the action key is released, the arrow events refresh the
+            hold normally and motion is continuous. If macOS doesn't
+            resume, the player has ~1 s to re-acquire the direction
+            without seeing the walk hiccup. Idle for ACTION_GRACE_S and
+            the walk drops, so 'release everything to stop' still works.
+
+            Plain walking (no action key) still uses MOVE_HOLD_S, so
+            single-tap nudges don't overshoot."""
+            ACTION_GRACE_S = 1.0
             if now_t < self.hold_right_until:
-                self.hold_right_until = now_t + MOVE_HOLD_S
+                self.hold_right_until = max(self.hold_right_until,
+                                            now_t + ACTION_GRACE_S)
                 self.last_press_right = now_t
             elif now_t < self.hold_left_until:
-                self.hold_left_until = now_t + MOVE_HOLD_S
+                self.hold_left_until = max(self.hold_left_until,
+                                           now_t + ACTION_GRACE_S)
                 self.last_press_left = now_t
 
         for k in keys:

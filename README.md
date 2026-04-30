@@ -50,9 +50,11 @@ A pygame pixel-art side-scroller. The world is a few screens wide, the
 camera follows you, and there are crate stacks to jump on or over,
 **pits in the floor** to leap over (or fall into and respawn),
 **floppy disks** to collect, and a one-shot **RAPID powerup** that
-halves the slingshot cooldown for 8 seconds. Kill all the ghouls and
-reach the right edge to receive a goofy "root access granted"
-certificate.
+halves the slingshot cooldown for 8 seconds. Killed ghouls sometimes
+trigger a **delivery drone** that hovers in and drops a weapon crate
+(RAPID / SPREAD / PIERCE). At the end of the world the **OVERLORD**
+shows up -- you have to put it down before the certificate of root
+access pops.
 
 ## Requirements
 
@@ -64,14 +66,17 @@ certificate.
 
 ```bash
 pip3 install -r requirements.txt
-python3 game.py
+python3 game.py            # fullscreen by default
+python3 game.py --windowed # 960x480 window
 ```
 
-A 960x480 pygame window opens. On first launch the game synthesizes
-a ~11-second palm-muted tritone riff (square wave + power-chord fifth,
-E2 root, ~176 bpm gallop) plus the SFX bleeps to your temp dir; the
-theme loops on the splash. Press **ENTER** to start (music stops), or
-**Q** / close the window to chicken out.
+The internal canvas stays at 160x80 and pygame nearest-neighbor scales
+to whatever your display is. **F11** toggles fullscreen at any time.
+On first launch the game synthesizes a ~11-second palm-muted tritone
+riff (square wave + power-chord fifth, E2 root, ~176 bpm gallop) plus
+the SFX bleeps to your temp dir; the theme loops on the splash. Press
+**ENTER** to start (music stops), or **Q** / close the window to
+chicken out.
 
 ## Controls
 
@@ -80,15 +85,23 @@ theme loops on the splash. Press **ENTER** to start (music stops), or
 | `Left` / `Right` (or `A` / `D`) | Walk left / right  |
 | `Space`            | Jump                  |
 | `X`                | Shoot slingshot       |
+| `F11`              | Toggle fullscreen     |
 | `Q` or `Esc`       | Quit                  |
 | `Up`               | (reserved for future ladders / vertical movement) |
 
 ## How to win
 
-Kill every ghoul (`X` to fire) without losing all your lives, and walk
-to the right edge of the level to claim the certificate. Watch your
-footing -- pits = bad. Grab floppy disks for completionist nerd points
-and the RAPID orb for a brief Contra-style fire-rate boost.
+Kill every ghoul (`X` to fire), then put down the **OVERLORD** that
+arrives near the end of the level, then walk to the right edge to
+claim the certificate. Watch your footing -- pits = bad. Grab floppy
+disks for completionist nerd points. Killed ghouls sometimes summon a
+delivery drone that drops a Contra-style weapon crate:
+
+| Crate    | Effect                              |
+|----------|-------------------------------------|
+| `RAPID`  | Slingshot cooldown halved for 8 s   |
+| `SPREAD` | Three pellets per shot (fan)        |
+| `PIERCE` | Pellet keeps going through enemies  |
 
 ## How to uninstall
 
@@ -99,6 +112,18 @@ rm -rf em-all
 (It is literally in the name.)
 
 ## Status
+
+**v0.8** -- fullscreen by default (F11 toggles), an end-of-level
+**boss** (the OVERLORD: a 2x-scale purple-tinted ghoul with 8 HP and
+a phosphor HP bar at the top of the screen), and **drone-delivered
+weapon crates**. Killed ghouls have a 30% chance of summoning a small
+mechanical delivery drone that flies in from off-screen, hovers, drops
+a weapon crate, and flies off the other way. Crates fall under
+gravity, land on the nearest surface, and grant `RAPID` /
+`SPREAD` / `PIERCE` for 8 seconds when picked up. Pellets render
+differently per weapon (red core for PIERCE; three-pellet fan for
+SPREAD). Win condition is now: kill 8 ghouls AND kill the OVERLORD AND
+walk to the right edge.
 
 **v0.7** -- ported from terminal stdin to a real pygame window. Real
 key-up events make the controls trivially correct: held = walk,

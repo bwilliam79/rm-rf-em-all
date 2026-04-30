@@ -182,6 +182,16 @@ PAL = {
     # gap / abyss
     'a': (  6,   8,  12),        # near-black void
     'A': ( 16,  18,  24),        # void mid
+
+    # delivery drone
+    '$': (180, 185, 200),        # drone body silver
+    '!': ( 80,  90, 110),        # drone body shadow / window
+    'Q': (235, 240, 250),        # rotor blade highlight
+
+    # boss (overlord) -- darker, bigger, badder
+    'U': (110,  20,  90),        # boss outline (dark purple)
+    'u': (170,  60, 140),        # boss skin (purple)
+    'I': (220,  90, 200),        # boss highlight (pink)
 }
 
 # ===================================================================
@@ -284,6 +294,38 @@ POWERUP_RAPID = [
     "ZyyyZ",
     ".ZZZ.",
 ]
+
+# 10x4 delivery drone (two animation frames; rotor blades shimmer)
+DRONE_A = [
+    "Q$$$$$$$$Q",
+    ".$$$$$$$$.",
+    ".$$!!!!$$.",
+    ".$$$$$$$$.",
+]
+DRONE_B = [
+    "$Q$$$$$$Q$",
+    ".$$$$$$$$.",
+    ".$$!!!!$$.",
+    ".$$$$$$$$.",
+]
+
+# 5x5 weapon crate (color is set in render based on kind)
+WEAPON_CRATE = [
+    "ccccc",
+    "cYYYc",
+    "cYlYc",
+    "cYYYc",
+    "ccccc",
+]
+
+# Boss "OVERLORD" sprite is built at runtime by scaling ENEMY_A/B 2x and
+# tinting purple -- see make_overlord_surfaces() below. Twice the size of
+# a regular ghoul, walks slower, takes BOSS_HP hits to kill.
+BOSS_W = 24
+BOSS_H = 32
+BOSS_HP = 8
+BOSS_PX_PER_SEC = 18.0
+BOSS_TINT = (160,  90, 220, 255)   # purple multiply tint
 
 # 4x6 torch (wall sconce)
 TORCH = [
@@ -438,6 +480,27 @@ def _make_sprite_surface(sprite_rows, palette=PAL, flip=False):
     return surf
 
 
+_OVERLORD_CACHE = {}   # ('A'|'B', flip) -> pygame.Surface
+
+
+def _get_overlord_surface(anim_t, flip):
+    """Build the boss sprite by scaling the regular ghoul 2x and tinting
+    purple. Cached so we only pay the cost once per (frame, flip)."""
+    frame = "A" if int(anim_t * 6) % 2 == 0 else "B"
+    key = (frame, bool(flip))
+    cached = _OVERLORD_CACHE.get(key)
+    if cached is not None:
+        return cached
+    base = _make_sprite_surface(ENEMY_A if frame == "A" else ENEMY_B,
+                                flip=flip)
+    big = pygame.transform.scale(base, (BOSS_W, BOSS_H))
+    tint = pygame.Surface((BOSS_W, BOSS_H), pygame.SRCALPHA)
+    tint.fill(BOSS_TINT)
+    big.blit(tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+    _OVERLORD_CACHE[key] = big
+    return big
+
+
 # ===================================================================
 # Background (computed once per resolution)
 # ===================================================================
@@ -535,18 +598,19 @@ def lerp_rgb(a, b, t):
 # World
 # ===================================================================
 class Pellet:
-    __slots__ = ("x", "y", "vx", "alive")
-    def __init__(self, x, y, vx):
+    __slots__ = ("x", "y", "vx", "alive", "pierce")
+    def __init__(self, x, y, vx, pierce=False):
         self.x = x
         self.y = y
         self.vx = vx
         self.alive = True
+        self.pierce = pierce  # if True, doesn't despawn on hit (Contra L gun)
 
 
 class Enemy:
     """A red ghoul. Moves at vx px/sec (signed -> direction). Reverses
     direction when it would step into a crate or fall into a gap."""
-    __slots__ = ("x", "y", "vx", "hp", "alive", "anim_t")
+    __slots__ = ("x", "y", "vx", "hp", "alive", "anim_t", "hit_set")
     def __init__(self, x, y, vx):
         self.x = x
         self.y = y
@@ -554,6 +618,53 @@ class Enemy:
         self.hp = 1
         self.alive = True
         self.anim_t = 0.0
+        self.hit_set = set()   # ids of pellets already counted vs this ghoul (for PIERCE)
+
+
+class Boss:
+    """The OVERLORD. Bigger, slower, multi-HP. Spawns once you near the
+    right edge of the world; must die in addition to the 8 ghouls."""
+    __slots__ = ("x", "y", "vx", "hp", "alive", "anim_t", "flash_until", "hit_set")
+    def __init__(self, x, y, vx):
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.hp = BOSS_HP
+        self.alive = True
+        self.anim_t = 0.0
+        self.flash_until = 0.0   # render briefly white when hit
+        self.hit_set = set()
+
+
+class Drone:
+    """Goofy mechanical delivery drone. Flies in from off-screen, drops
+    a weapon crate near a target_x, flies off the other side. State:
+      - 'approaching' -- carrying crate, still on its way to target
+      - 'leaving'     -- crate dropped, just exiting the world
+    """
+    __slots__ = ("x", "y", "vx", "target_x", "state", "kind", "alive", "anim_t")
+    def __init__(self, x, y, vx, target_x, kind):
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.target_x = target_x
+        self.state = "approaching"
+        self.kind = kind        # "RAPID" / "SPREAD" / "PIERCE"
+        self.alive = True
+        self.anim_t = 0.0
+
+
+class WeaponCrate:
+    """A small crate dropped by a drone. Falls under gravity, lands on the
+    nearest surface, sits until the player walks over it."""
+    __slots__ = ("x", "y", "vy", "kind", "grounded", "claimed")
+    def __init__(self, x, y, kind):
+        self.x = x
+        self.y = y
+        self.vy = 0.0
+        self.kind = kind
+        self.grounded = False
+        self.claimed = False
 
 
 class World:
@@ -589,8 +700,16 @@ class World:
         # last x where player was safely grounded (NOT above a gap). Respawn
         # point after falling into a pit.
         self.last_safe_x = float(PLAYER_MIN_X + 4)
-        # rapid-fire timer: fire-rate is doubled while time.time() < rapid_until
-        self.rapid_until = 0.0
+        # active weapon mode + expiry. weapon_kind in {"DEFAULT","RAPID","SPREAD","PIERCE"}.
+        self.weapon_kind = "DEFAULT"
+        self.weapon_until = 0.0
+        # delivery drones currently flying through the level
+        self.drones = []
+        # weapon crates that have been dropped and are on the ground waiting
+        self.weapon_crates = []
+        # the boss (None until triggered, then a single Boss instance)
+        self.boss = None
+        self.boss_announced = False
         # disks collected count (total floppies set by _gen_level)
         self.disks = 0
         self.disks_total = 0
@@ -754,16 +873,28 @@ class World:
 
     def shoot(self):
         now = time.time()
-        cooldown = PELLET_COOLDOWN * 0.5 if now < self.rapid_until else PELLET_COOLDOWN
+        # Active weapon, with auto-revert to DEFAULT when timer elapses
+        if now >= self.weapon_until:
+            self.weapon_kind = "DEFAULT"
+        kind = self.weapon_kind
+        cooldown = PELLET_COOLDOWN * 0.5 if kind == "RAPID" else PELLET_COOLDOWN
         if now - self.last_shot < cooldown:
             return
         self.last_shot = now
-        # pellet emerges from slingshot tip ~ right side of nerd, mid-height
         sling_x = self.player_x + (12 if self.player_face_right else 1)
         sling_y = self.player_y + 12
-        # vx is in px/sec; pellet update integrates with dt
-        vx = PELLET_PX_PER_SEC if self.player_face_right else -PELLET_PX_PER_SEC
-        self.pellets.append(Pellet(sling_x, sling_y, vx))
+        sign = 1 if self.player_face_right else -1
+        vx = sign * PELLET_PX_PER_SEC
+        if kind == "SPREAD":
+            # 3 pellets fanning out (~10 px/s vertical for the outer ones)
+            self.pellets.append(Pellet(sling_x, sling_y, vx))
+            self.pellets.append(Pellet(sling_x, sling_y - 1, vx * 0.95))   # cosmetic offset
+            self.pellets.append(Pellet(sling_x, sling_y + 1, vx * 0.95))
+        elif kind == "PIERCE":
+            self.pellets.append(Pellet(sling_x, sling_y, vx, pierce=True))
+        else:
+            # DEFAULT or RAPID: single pellet
+            self.pellets.append(Pellet(sling_x, sling_y, vx))
         play("shoot")
 
     def _respawn(self):
@@ -783,10 +914,40 @@ class World:
         self.message_until = time.time() + 1.4
         play("hit")
 
+    def _maybe_send_drone(self, kill_x, kill_y):
+        """25% chance after a ghoul kill: a delivery drone flies in from
+        off-screen and drops a random weapon crate near the kill site."""
+        if random.random() > 0.30:
+            return
+        kind = random.choice(["RAPID", "SPREAD", "PIERCE"])
+        # Drone target: near where the ghoul died, but clamped to the
+        # currently visible area so the player actually sees the drop.
+        target_x = max(self.camera_x + 20,
+                       min(self.camera_x + self.fb_w - 20, kill_x))
+        # Pick whichever side is closer to off-screen so the drone enters
+        # from the same direction the player isn't looking.
+        from_left = random.random() < 0.5
+        if from_left:
+            x = self.camera_x - 14
+            vx = +60.0
+        else:
+            x = self.camera_x + self.fb_w + 4
+            vx = -60.0
+        y = 6.0   # high in the sky, above the wall_top
+        self.drones.append(Drone(x, y, vx, target_x, kind))
+
+    def _grant_weapon(self, kind, duration=8.0):
+        self.weapon_kind = kind
+        self.weapon_until = time.time() + duration
+        labels = {"RAPID": "*RAPID FIRE*", "SPREAD": "*SPREAD SHOT*",
+                  "PIERCE": "*PIERCE ROUND*"}
+        self.message = labels.get(kind, "*POWER UP*") + "  ROOT++"
+        self.message_until = time.time() + 1.6
+        play("kill")
+
     def _check_pickups(self):
-        """Floppy disks + powerups: claim any whose bbox intersects the
-        player. Floppies are 5x6, powerups 5x5 (sprite shapes); use simple
-        rectangle overlap with the player's collision bbox."""
+        """Floppy disks + powerups + weapon crates: claim any whose bbox
+        intersects the player."""
         ax, ay, aw, ah = self._player_bbox()
         for f in self.floppies:
             if f[2]:
@@ -795,7 +956,7 @@ class World:
             if (fx < ax + aw and fx + 5 > ax and fy < ay + ah and fy + 6 > ay):
                 f[2] = True
                 self.disks += 1
-                play("kill")  # reuse the bling sound; no new asset
+                play("kill")
         for p in self.powerups:
             if p[3]:
                 continue
@@ -803,10 +964,15 @@ class World:
             if (px < ax + aw and px + 5 > ax and py < ay + ah and py + 5 > ay):
                 p[3] = True
                 if p[0] == "RAPID":
-                    self.rapid_until = time.time() + 8.0
-                    self.message = "*RAPID FIRE*  ROOT++"
-                    self.message_until = time.time() + 1.6
-                    play("kill")
+                    self._grant_weapon("RAPID")
+        # Drone-delivered weapon crates: 5x5 boxes sitting on the ground
+        for c in self.weapon_crates:
+            if c.claimed or not c.grounded:
+                continue
+            if (c.x < ax + aw and c.x + 5 > ax
+                    and c.y < ay + ah and c.y + 5 > ay):
+                c.claimed = True
+                self._grant_weapon(c.kind)
 
     def tick(self, dt, keys):
         """Advance world state by dt seconds.
@@ -979,14 +1145,19 @@ class World:
             for p in self.pellets:
                 if not p.alive:
                     continue
+                if id(p) in e.hit_set:
+                    continue
                 if (e.x - 1 <= p.x <= e.x + 12
                         and e.y - 1 <= p.y <= e.y + 16):
                     e.alive = False
-                    p.alive = False
+                    if not p.pierce:
+                        p.alive = False
+                    e.hit_set.add(id(p))
                     self.kills += 1
                     self.message = random.choice(KILL_TAUNTS)
                     self.message_until = time.time() + 1.4
                     play("kill")
+                    self._maybe_send_drone(e.x, e.y)
                     break
             # touch player (full bbox so jumping clears them)
             if e.alive:
@@ -1009,13 +1180,128 @@ class World:
         cull_x = self.camera_x - 32
         self.enemies = [e for e in self.enemies if e.alive or e.x > cull_x]
 
-        # win/lose. To win you must kill all the ghouls AND walk to the very
-        # right edge of the level -- the certificate is at the end.
+        # ---- delivery drones ----
+        for d in self.drones:
+            if not d.alive:
+                continue
+            d.x += d.vx * dt
+            d.anim_t += dt
+            if d.state == "approaching":
+                # Drop the crate when the drone passes its target_x. Direction
+                # of approach is in vx's sign.
+                passed = (d.vx > 0 and d.x >= d.target_x) \
+                      or (d.vx < 0 and d.x <= d.target_x)
+                if passed:
+                    self.weapon_crates.append(
+                        WeaponCrate(int(d.x + 4), int(d.y + 5), d.kind))
+                    d.state = "leaving"
+            # Despawn drone once well off-camera
+            if d.x < self.camera_x - 30 or d.x > self.camera_x + self.fb_w + 30:
+                d.alive = False
+        self.drones = [d for d in self.drones if d.alive]
+
+        # ---- weapon crates: gravity + ground/obstacle landing ----
+        for c in self.weapon_crates:
+            if c.claimed:
+                continue
+            if not c.grounded:
+                c.vy += GRAVITY_PX_PER_SEC2 * dt
+                new_y = c.y + c.vy * dt
+                # Land if the bottom of the crate (y + 5) crosses an
+                # obstacle top or the ground at this x.
+                top = self.ground_y - 5
+                cx_center = c.x + 2
+                for ox, oy, ow, oh in self.obstacles:
+                    if ox <= cx_center <= ox + ow:
+                        cand = oy - 5
+                        if cand < top:
+                            top = cand
+                if not self._in_gap(cx_center) and new_y >= top:
+                    c.y = top
+                    c.vy = 0.0
+                    c.grounded = True
+                else:
+                    c.y = new_y
+                    # If center is in a gap, fall off-screen and despawn
+                    if c.y > self.fb_h + 20:
+                        c.claimed = True   # treat as gone
+        self.weapon_crates = [c for c in self.weapon_crates if not c.claimed]
+
+        # ---- boss: spawn once the player nears the right edge ----
+        if (self.boss is None
+                and self.kills >= TOTAL_ENEMIES
+                and self.player_x >= self.world_w * 0.78):
+            bx = self.world_w - 40
+            by = self.ground_y - BOSS_H
+            self.boss = Boss(bx, by, -BOSS_PX_PER_SEC)
+            self.boss_announced = True
+            self.message = "OVERLORD APPROACHES."
+            self.message_until = time.time() + 2.0
+            play("lose")  # ominous low thud reused
+
+        if self.boss is not None and self.boss.alive:
+            b = self.boss
+            new_bx = b.x + b.vx * dt
+            blocked = False
+            for ox, oy, ow, oh in self.obstacles:
+                if (new_bx + 2 < ox + ow and new_bx + BOSS_W - 2 > ox
+                        and b.y + 4 < oy + oh and b.y + BOSS_H > oy):
+                    blocked = True
+                    break
+            if not blocked:
+                lead = new_bx + (BOSS_W if b.vx > 0 else 0)
+                if self._in_gap(int(lead)) or lead <= 0 or lead >= self.world_w:
+                    blocked = True
+            if blocked:
+                b.vx = -b.vx
+            else:
+                b.x = new_bx
+            b.anim_t += dt
+            # Pellets damage the boss
+            for p in self.pellets:
+                if not p.alive:
+                    continue
+                if id(p) in b.hit_set:
+                    continue
+                if (b.x - 2 <= p.x <= b.x + BOSS_W + 2
+                        and b.y + 4 <= p.y <= b.y + BOSS_H):
+                    b.hp -= 1
+                    b.flash_until = time.time() + 0.10
+                    b.hit_set.add(id(p))
+                    if not p.pierce:
+                        p.alive = False
+                    play("hit")
+                    if b.hp <= 0:
+                        b.alive = False
+                        self.message = "OVERLORD UNINSTALLED."
+                        self.message_until = time.time() + 2.0
+                        play("kill")
+                    break
+            # Boss touches player
+            if b.alive:
+                pleft  = self.player_x + 2
+                pright = self.player_x + 12
+                ptop   = self.player_y + 4
+                pbot   = self.player_y + len(NERD)
+                if (b.x < pright and b.x + BOSS_W > pleft
+                        and b.y + 4 < pbot and b.y + BOSS_H > ptop):
+                    if time.time() - self.last_hit > HIT_COOLDOWN:
+                        self.lives -= 1
+                        self.last_hit = time.time()
+                        play("hit")
+
+        # ---- weapon timer expires -> revert to default ----
+        if time.time() >= self.weapon_until and self.weapon_kind != "DEFAULT":
+            self.weapon_kind = "DEFAULT"
+
+        # ---- win/lose ----
         if self.lives <= 0:
             self.state = "lose"
             self.end_message = random.choice(DEATH_QUOTES)
             play("lose")
-        elif self.kills >= TOTAL_ENEMIES and self.player_x >= self.world_w - 30:
+        elif (self.kills >= TOTAL_ENEMIES
+              and self.boss is not None and not self.boss.alive
+              and self.player_x >= self.world_w - 30):
             self.state = "win"
             self.end_message = random.choice(WIN_QUOTES)
             play("win")
@@ -1092,9 +1378,34 @@ def render_world(fb, world):
             continue
         sx = p[1] - cx
         if -6 <= sx < fb.w + 6:
-            # bob up/down 1 px
             bob = 0 if pulse < 1 else 1
             fb.blit_sprite(POWERUP_RAPID, sx, p[2] - bob)
+
+    # Drone-delivered weapon crates (sit on the ground after landing)
+    for wc in world.weapon_crates:
+        if wc.claimed:
+            continue
+        sx = wc.x - cx
+        if -6 <= sx < fb.w + 6:
+            fb.blit_sprite(WEAPON_CRATE, sx, int(wc.y))
+            # 1-letter label above the crate so the player knows what's coming
+            label = wc.kind[0]   # R / S / P
+            lw = 5
+            fb.blit_text(label, sx, int(wc.y) - 8, PAL['Y'])
+
+    # Boss (drawn before regular enemies so they overlap correctly)
+    if world.boss is not None and world.boss.alive:
+        b = world.boss
+        sx = int(b.x) - cx
+        if -BOSS_W <= sx < fb.w + BOSS_W:
+            surf = _get_overlord_surface(b.anim_t, b.vx < 0)
+            if time.time() < b.flash_until:
+                # Flash white when hit
+                flash = surf.copy()
+                flash.fill((255, 255, 255, 200), special_flags=pygame.BLEND_RGBA_MULT)
+                fb.surface.blit(flash, (sx, int(b.y)))
+            else:
+                fb.surface.blit(surf, (sx, int(b.y)))
 
     # Enemies (back to front by world x). Cull off-screen.
     for e in sorted(world.enemies, key=lambda e: -e.x):
@@ -1111,32 +1422,44 @@ def render_world(fb, world):
     fb.blit_sprite(NERD, psx, int(world.player_y),
                    flip=not world.player_face_right)
 
-    # Pellets: 2x2 ball + glow + trailing streak
+    # Pellets: 2x2 ball + glow + trailing streak. PIERCE pellets get a
+    # red core to read as a different round.
     for p in world.pellets:
         if not p.alive:
             continue
         spx = int(p.x) - cx
         py = int(p.y)
-        # streak (4 px tail) opposite to direction
         sign = -1 if p.vx > 0 else 1
+        glow = PAL['o']
+        core = PAL['D'] if p.pierce else PAL['O']
         for d in range(1, 5):
-            fb.set(spx + sign * d, py, PAL['o'])
-        # glow halo
+            fb.set(spx + sign * d, py, glow)
         for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            fb.set(spx + dx, py + dy, PAL['o'])
-        # core ball (2x2)
-        fb.fill_rect(spx, py, 2, 2, PAL['O'])
+            fb.set(spx + dx, py + dy, glow)
+        fb.fill_rect(spx, py, 2, 2, core)
 
-    # HUD bar (top). Stat is left-aligned, RAPID timer right-aligned, so the
-    # two don't fight over the center of the bar.
+    # Delivery drones (drawn after game entities so they hover overhead)
+    for d in world.drones:
+        if not d.alive:
+            continue
+        sx = int(d.x) - cx
+        if -10 <= sx < fb.w + 10:
+            frame = DRONE_A if int(d.anim_t * 12) % 2 == 0 else DRONE_B
+            fb.blit_sprite(frame, sx, int(d.y))
+            # cable + dangling crate while still carrying
+            if d.state == "approaching":
+                fb.set(sx + 4, int(d.y) + 4, PAL['$'])
+                fb.set(sx + 4, int(d.y) + 5, PAL['$'])
+                fb.blit_sprite(WEAPON_CRATE, sx + 2, int(d.y) + 6)
+
+    # HUD bar (top). Stat is left-aligned, weapon timer right-aligned.
     hud_h = 9
     fb.fill_rect(0, 0, fb.w, hud_h, (10, 16, 12))
     now = time.time()
-    rapid_left = max(0.0, world.rapid_until - now)
-    rapid_text = f"RAPID {rapid_left:.0f}S" if rapid_left > 0 else ""
-    rapid_w = (len(rapid_text) * 6 - 1) if rapid_text else 0
-    # Reserve room on the right for RAPID + 4 px gap.
-    budget = fb.w - 4 - (rapid_w + 4 if rapid_text else 0)
+    weapon_left = max(0.0, world.weapon_until - now) if world.weapon_kind != "DEFAULT" else 0.0
+    weapon_text = f"{world.weapon_kind} {weapon_left:.0f}S" if weapon_left > 0 else ""
+    weapon_w = (len(weapon_text) * 6 - 1) if weapon_text else 0
+    budget = fb.w - 4 - (weapon_w + 4 if weapon_text else 0)
 
     full = (f"KILLS {world.kills}/{TOTAL_ENEMIES}  "
             f"DISKS {world.disks}/{world.disks_total}  "
@@ -1154,8 +1477,21 @@ def render_world(fb, world):
     else:
         stat = short
     fb.blit_text(stat, 2, 1, PAL['C'])
-    if rapid_text:
-        fb.blit_text(rapid_text, fb.w - rapid_w - 2, 1, PAL['Y'])
+    if weapon_text:
+        fb.blit_text(weapon_text, fb.w - weapon_w - 2, 1, PAL['Y'])
+
+    # Boss HP bar (just below the HUD when boss is on-screen)
+    if world.boss is not None and world.boss.alive:
+        bar_y = hud_h + 1
+        bar_w = fb.w - 20
+        bar_x = 10
+        fb.fill_rect(bar_x - 1, bar_y - 1, bar_w + 2, 5, (60, 60, 80))
+        fb.fill_rect(bar_x, bar_y, bar_w, 3, (40, 0, 20))
+        filled = int(bar_w * world.boss.hp / BOSS_HP)
+        fb.fill_rect(bar_x, bar_y, filled, 3, PAL['I'])
+        label = "OVERLORD"
+        lw = len(label) * 6 - 1
+        fb.blit_text(label, max(2, (fb.w - lw) // 2), bar_y + 5, PAL['I'])
 
     # taunt centered if active
     if now < world.message_until:
@@ -1475,6 +1811,8 @@ def collect_input():
                 keys.append("JUMP")
             elif event.key == pygame.K_x:
                 keys.append("SHOOT")
+            elif event.key == pygame.K_F11:
+                keys.append("TOGGLE_FULLSCREEN")
             elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 enter_flag = True
                 keys.append("ENTER")
@@ -1490,8 +1828,9 @@ def collect_input():
 
 
 def present(fb, screen):
-    """Scale the internal framebuffer to the window and flip the display."""
-    pygame.transform.scale(fb.surface, (screen.get_width(), screen.get_height()), screen)
+    """With pygame.SCALED the screen surface IS at INTERNAL_W x INTERNAL_H,
+    so we just blit straight in and pygame upscales nearest-neighbor."""
+    screen.blit(fb.surface, (0, 0))
     pygame.display.flip()
 
 
@@ -1658,16 +1997,27 @@ def splash(fb, screen, clock):
 # ===================================================================
 # Main
 # ===================================================================
+def make_screen(fullscreen):
+    """Open / re-open the display. With pygame.SCALED, pygame handles
+    nearest-neighbor scaling from INTERNAL_W x INTERNAL_H to the actual
+    window/display size, so all our drawing stays at the internal
+    resolution."""
+    flags = pygame.SCALED
+    if fullscreen:
+        flags |= pygame.FULLSCREEN
+    screen = pygame.display.set_mode((INTERNAL_W, INTERNAL_H), flags)
+    pygame.display.set_caption(WINDOW_TITLE)
+    pygame.mouse.set_visible(False)
+    return screen
+
+
 def main():
     pygame.init()
     init_audio()
 
-    flags = pygame.SCALED | pygame.RESIZABLE
-    screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-    pygame.display.set_caption(WINDOW_TITLE)
-    pygame.mouse.set_visible(False)
+    fullscreen = "--windowed" not in sys.argv
+    screen = make_screen(fullscreen)
     clock = pygame.time.Clock()
-
     fb = Framebuffer(INTERNAL_W, INTERNAL_H)
 
     try:
@@ -1687,8 +2037,11 @@ def main():
             last = now
 
             keys, quit_flag, _ = collect_input()
+            # F11 toggles fullscreen
+            if "TOGGLE_FULLSCREEN" in keys:
+                fullscreen = not fullscreen
+                screen = make_screen(fullscreen)
             if quit_flag:
-                # Q always quits, even on win/lose screens
                 break
             if world.state == "playing":
                 world.tick(dt, keys)

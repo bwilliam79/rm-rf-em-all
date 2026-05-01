@@ -27,15 +27,27 @@ except ImportError:
     sys.exit(1)
 
 # ===================================================================
-# Display tuning -- internal resolution preserved from the terminal
-# version so all the existing sprite/level code Just Works. Scaled up
-# nearest-neighbor in the window for crisp pixels.
+# Display tuning. The game's logical world is still measured in the
+# original 160x80 grid (all physics, collision, level layout, AI use
+# those units), but the actual rendering canvas is twice that --
+# 320x160 -- so we get '16-bit' pixel density. Each world pixel maps
+# to a PIXEL_SCALE x PIXEL_SCALE block of canvas pixels.
+#
+# 8-bit sprites (existing char-grid art) are auto-upscaled by
+# PIXEL_SCALE at render time so they look identical to the v0.9 game.
+# 'Hires' sprites pass hires=True to blit_sprite and provide a 2x-
+# denser char grid -- their chars draw 1:1 at the canvas resolution,
+# revealing real 16-bit detail (smushed Frenchie face, lab-coat
+# folds, etc.) in the same physical screen footprint.
 # ===================================================================
-INTERNAL_W         = 160
+INTERNAL_W         = 160                          # world units
 INTERNAL_H         = 80
-WINDOW_SCALE       = 6
-WINDOW_W           = INTERNAL_W * WINDOW_SCALE   # 960
-WINDOW_H           = INTERNAL_H * WINDOW_SCALE   # 480
+PIXEL_SCALE        = 2                            # canvas pixels per world pixel
+CANVAS_W           = INTERNAL_W * PIXEL_SCALE     # 320
+CANVAS_H           = INTERNAL_H * PIXEL_SCALE     # 160
+WINDOW_SCALE       = 3                            # window = 960x480 (same as v0.9)
+WINDOW_W           = CANVAS_W * WINDOW_SCALE      # 960
+WINDOW_H           = CANVAS_H * WINDOW_SCALE      # 480
 WINDOW_TITLE       = "RM -RF 'EM ALL"
 
 # ===================================================================
@@ -326,35 +338,152 @@ PAL = {
 # ===================================================================
 # Sprites - rectangular grids, one char per pixel.
 # '.' or ' ' = transparent.  Multi-char keys NOT used here; one char each.
+#
+# All gameplay sprites are stored at 'hires' density: each char is one
+# canvas pixel, and the renderer (Framebuffer.blit_sprite, hires=True)
+# paints them 1:1. The corresponding world-coord footprint is HALF the
+# char-grid dimensions in each axis, so a 36x40 NERD draws at 18x20
+# world units -- same physical footprint as the v0.9 8-bit NERD, with
+# 4x the detail. Each sprite gets companion `*_LOGICAL_W/H` constants
+# for collision code that needs the world-coord size (since len(sprite)
+# now returns char-grid size, not world size).
+#
+# Sprites that don't carry per-pixel detail (because the source art was
+# already simple) are built by mechanically doubling the original 8-bit
+# pattern: each 8-bit pixel becomes a 2x2 block. Sprites that DO have
+# room for new detail (NERD, ghouls, bosses, etc.) start from a doubled
+# base and apply a list of (y, x, ch) detail patches.
 # ===================================================================
 
-# 18 wide x 20 tall nerd protagonist with glasses, holding a Y-shaped slingshot
-# extending out to the right hand. ".\" / " " = transparent. Pixel keys map via PAL.
-NERD = [
-    "....HHHHHH........",
-    "..HHHHHHHHHH......",
-    "..HsssssssH.......",
-    "..HsssssssH.......",
-    ".HFFLLFFLLFFH.....",
-    ".HFLELFFLELFH.....",
-    "..HsssssssH.......",
-    "...sssMMss........",
-    "....sssss.........",
-    "...PPPnPPP........",   # closed neck, tiny purple shirt peek
-    "..PPpNnnnNp..W.W..",   # V-collar opens: lapels (N) frame undershirt (n)
-    "..pPPPNPPPpsWRRRW.",   # V tip
-    "..PPPPPPPPPsWWoWW.",
-    "..PPPPPPPPPs.WRW..",
-    "..pPPPNPPPp..WWW..",   # button
-    "...PPPPPP....WW...",
-    "...TTTTT.....WW...",
-    "..tTTTTt..........",
-    "..tT..Tt..........",
-    "..bb..bb..........",
-]
+def _double_sprite(src):
+    """Each char in `src` becomes a 2x2 block. Result is a list of
+    strings whose row count is 2x src and column count is 2x src[0]."""
+    out = []
+    for row in src:
+        doubled = ''.join(c * 2 for c in row)
+        out.append(doubled)
+        out.append(doubled)
+    return out
 
-# 12 wide x 16 tall red ghoul, two animation frames (legs swap)
-ENEMY_A = [
+
+def _patch_sprite(rows, edits):
+    """Apply per-pixel detail patches to a doubled sprite. Each edit is
+    one of two forms:
+        (y, x, ch)            -- always apply, even on transparent pixels
+        (y, x, ch, src)       -- apply only if existing pixel is in `src`
+                                 (a string of allowed source characters)
+    The 4-tuple form is the safer one: it prevents stray pixels from
+    landing on transparent or wrong-colored areas (e.g. a 'hair shadow'
+    patch only applies if the existing pixel is hair). Coords are in
+    the hires (post-doubling) grid; out-of-bounds is silently ignored."""
+    if not edits:
+        return [''.join(r) if isinstance(r, list) else r for r in rows]
+    patched = [list(r) for r in rows]
+    H = len(patched)
+    W = len(patched[0]) if H else 0
+    for edit in edits:
+        if len(edit) == 4:
+            y, x, ch, src = edit
+        else:
+            y, x, ch = edit
+            src = None
+        if 0 <= y < H and 0 <= x < W:
+            if src is None or patched[y][x] in src:
+                patched[y][x] = ch
+    return [''.join(r) for r in patched]
+
+
+def _ellipse(rows, cx, cy, rx, ry, ch):
+    """Fill an axis-aligned ellipse on a 2D char grid (mutates in place).
+    `rows` is a list of mutable rows (each a list of chars or string
+    that will be converted). cx, cy, rx, ry are the center and radii."""
+    H, W = len(rows), len(rows[0])
+    for y in range(H):
+        for x in range(W):
+            d = ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2
+            if d <= 1.0:
+                rows[y][x] = ch
+
+
+def _rect(rows, x0, y0, w, h, ch):
+    """Fill an axis-aligned rectangle on a 2D char grid (mutates in place)."""
+    H, W = len(rows), len(rows[0])
+    for y in range(y0, y0 + h):
+        for x in range(x0, x0 + w):
+            if 0 <= x < W and 0 <= y < H:
+                rows[y][x] = ch
+
+
+# 8-bit NERD source kept here for reference. The actual sprite (NERD,
+# below) is the hires 36x40 version built from this and detail-patched
+# with hair shadow streaks, glasses-rim shine, eye highlights, lab-coat
+# folds, slingshot wood grain, and pant pleats.
+_NERD_SRC = [
+    "....HHHHHH........",   # 0:  hair top
+    "..HHHHHHHHHH......",   # 1:  hair widening
+    "..HsssssssH.......",   # 2:  forehead
+    "..HsssssssH.......",   # 3
+    ".HFFLLFFLLFFH.....",   # 4:  glasses (FF frame, LL lens)
+    ".HFLELFFLELFH.....",   # 5:  glasses with pupils
+    "..HsssssssH.......",   # 6:  cheeks
+    "...sssMMss........",   # 7:  mouth
+    "....sssss.........",   # 8:  chin
+    "...PPPnPPP........",   # 9:  coat top + collar peek
+    "..PPpNnnnNp..W.W..",   # 10: shoulders + slingshot Y-frame top
+    "..pPPPNPPPpsWRRRW.",   # 11: V collar opens + slingshot rubber band
+    "..PPPPPPPPPsWWoWW.",   # 12: coat + slingshot taut
+    "..PPPPPPPPPs.WRW..",   # 13: coat + slingshot
+    "..pPPPNPPPp..WWW..",   # 14: button row + slingshot bottom
+    "...PPPPPP....WW...",   # 15: coat narrowing
+    "...TTTTT.....WW...",   # 16: pants top + slingshot grip
+    "..tTTTTt..........",   # 17: pants
+    "..tT..Tt..........",   # 18: pants split (between legs)
+    "..bb..bb..........",   # 19: boots
+]
+NERD_LOGICAL_W = 18
+NERD_LOGICAL_H = 20
+
+# Detail patches for NERD. Each edit uses the 4-tuple form (y, x, ch, src):
+# the patch only applies if the existing pixel is in `src`. This makes
+# patches safe -- a hair-shadow patch only takes effect if the target
+# pixel is actually hair, so coordinate mistakes don't create stray
+# black specks on the face / floating pixels in the air.
+_NERD_DETAIL = [
+    # Hair shadow streaks - only apply on actual hair pixels
+    (2, 9, 'h', 'H'), (3, 17, 'h', 'H'),
+    (5, 5, 'h', 'H'), (7, 5, 'h', 'H'),     # left hair side shadow
+    (5, 21, 'h', 'H'), (7, 21, 'h', 'H'),   # right hair side shadow
+    (12, 5, 'h', 'H'), (12, 21, 'h', 'H'),  # cheekside hair
+    # Eye highlight: tiny white reflection on the pupil
+    (10, 9, 'L', 'E'), (10, 19, 'L', 'E'),
+    # Glasses-rim catchlights: brighter pixel on the dark frame
+    (8, 5, 'L', 'F'), (8, 15, 'L', 'F'),
+    # Lip shadow: only on the mouth pixels, not the surrounding skin
+    (15, 14, 'i', 'M'), (15, 15, 'i', 'M'),
+    # Lab-coat folds: 'p' shadow strokes only on actual coat ('P')
+    (20, 9, 'p', 'P'), (22, 7, 'p', 'P'), (24, 11, 'p', 'P'),
+    (26, 8, 'p', 'P'), (28, 9, 'p', 'P'),
+    (22, 17, 'p', 'P'), (24, 18, 'p', 'P'), (26, 19, 'p', 'P'),
+    # Coat-bottom hem
+    (30, 7, 'p', 'P'), (30, 17, 'p', 'P'),
+    # Pants pleats - only on pant pixels
+    (33, 9, 't', 'T'), (35, 9, 't', 'T'),
+    (33, 13, 't', 'T'), (35, 13, 't', 'T'),
+    # Slingshot wood grain: only on actual wood ('W'), so off-target
+    # patches won't create floating brown specs next to the slingshot
+    (23, 25, 'w', 'W'), (25, 27, 'w', 'W'),
+    (29, 27, 'w', 'W'), (31, 27, 'w', 'W'),
+    # Rubber band highlight
+    (23, 27, 'o', 'R'), (23, 29, 'o', 'R'),
+    # Boot polish: only if pixel is actually a boot
+    (38, 5, 'i', 'b'), (38, 15, 'i', 'b'),
+]
+NERD = _patch_sprite(_double_sprite(_NERD_SRC), _NERD_DETAIL)
+
+# Level-1 enemy: red ghoul. Two animation frames (legs swap). At hires
+# (24x32 char grid) the existing 12x16 silhouette gets sharper
+# eye/mouth definition + claws/drips of decay flesh.
+_ENEMY_A_SRC = [
     "...rrrrrr...",
     "..drrrrrrr..",
     "..drVdddVdr.",
@@ -372,8 +501,7 @@ ENEMY_A = [
     "..rr.rr.rr..",
     "..ii.ii.ii..",
 ]
-
-ENEMY_B = [
+_ENEMY_B_SRC = [
     "...rrrrrr...",
     "..drrrrrrr..",
     "..drVdddVdr.",
@@ -391,11 +519,31 @@ ENEMY_B = [
     "rr........rr",
     "ii........ii",
 ]
+ENEMY_LOGICAL_W = 12
+ENEMY_LOGICAL_H = 16
+
+# Detail patches for the ghoul. Each edit uses 4-tuple form so off-
+# target coords silently no-op rather than creating stray pixels.
+_ENEMY_DETAIL = [
+    # Bright catchlight in each yellow eye -- only apply on 'V' pixels
+    (4, 8, 'l', 'V'), (4, 16, 'l', 'V'),
+    # Forehead shadow band: only on dark-red ('r') pixels
+    (3, 5, 'i', 'r'), (3, 17, 'i', 'r'),
+    # Fang highlight inside the open mouth -- only on mouth ('m')
+    (8, 11, '8', 'm'), (10, 13, '8', 'm'),
+    # Cheek highlight: only on mid-red 'd'
+    (5, 7, 'D', 'd'), (5, 15, 'D', 'd'),
+    # Decay drip from the mouth: only if existing is mouth or red shadow
+    (12, 11, 'r', 'rdmi'),
+]
+ENEMY_A = _patch_sprite(_double_sprite(_ENEMY_A_SRC), _ENEMY_DETAIL)
+ENEMY_B = _patch_sprite(_double_sprite(_ENEMY_B_SRC), _ENEMY_DETAIL)
 
 # Level-2 enemy: rogue CPU. Square chip body with a metallic brand
 # stripe + pin pads. Same r/d/D/m/V palette so the level-2 cyan tint
-# applies automatically.
-CPU_A = [
+# applies automatically. Hires version adds chip-pin grooves,
+# heat-sink fins, and a tiny LED.
+_CPU_A_SRC = [
     "............",
     "...rrrrrr...",
     "..rrrrrrrr..",
@@ -413,7 +561,7 @@ CPU_A = [
     ".rr..rr..rr.",
     ".ii..ii..ii.",
 ]
-CPU_B = [
+_CPU_B_SRC = [
     "............",
     "...rrrrrr...",
     "..rrrrrrrr..",
@@ -431,12 +579,26 @@ CPU_B = [
     "rr..rr..rr..",
     "ii..ii..ii..",
 ]
+# CPU detail with safe src filters. Patches no-op on the wrong pixel
+# instead of leaving stray dots in the air.
+_CPU_DETAIL = [
+    # Brand-stripe shine: only on light-red 'D' pixels
+    (8, 8, 'l', 'D'), (8, 14, 'l', 'D'),
+    # Eye-band reflections (mouth-row 'm')
+    (10, 11, '8', 'm'), (10, 13, '8', 'm'),
+    # Edge-pin contact highlights (only on 'r' pin pixels)
+    (22, 5, 'i', 'r'), (22, 13, 'i', 'r'),
+    (24, 7, 'i', 'r'), (24, 17, 'i', 'r'),
+]
+CPU_A = _patch_sprite(_double_sprite(_CPU_A_SRC), _CPU_DETAIL)
+CPU_B = _patch_sprite(_double_sprite(_CPU_B_SRC), _CPU_DETAIL)
 
 # Level-3 enemy: KAREN. Blonde bob, frowning face, sweater, jeans,
 # loafers. Hair uses 'V' (eye-yellow palette key, gets overridden to a
 # warm cream in the level-3 theme), face uses 's' (skin), body uses
-# the r/d/D/m/i ghoul palette like the others.
-KAREN_A = [
+# the r/d/D/m/i ghoul palette like the others. Hires adds defined
+# eyebrows, lipstick highlight, sweater knit texture, and necklace.
+_KAREN_A_SRC = [
     "............",
     "...VVVVVV...",
     "..VVVVVVVV..",
@@ -454,7 +616,7 @@ KAREN_A = [
     "..rr..rr....",
     "..ii..ii....",
 ]
-KAREN_B = [
+_KAREN_B_SRC = [
     "............",
     "...VVVVVV...",
     "..VVVVVVVV..",
@@ -472,6 +634,23 @@ KAREN_B = [
     "..rr..rr....",
     "..ii..ii....",
 ]
+_KAREN_DETAIL = [
+    # Hair highlights: only land on actual hair ('V')
+    (3, 9, '8', 'V'), (3, 17, '8', 'V'),
+    (5, 7, '8', 'V'), (5, 19, '8', 'V'),
+    # Lipstick highlight: only on mouth pixels
+    (12, 12, 'l', 'M'), (12, 13, 'l', 'M'),
+    # Necklace beads: only on the sweater body (light pink 'D'), so
+    # the patches don't poke into the skin or below the bottom.
+    (15, 11, 'e', 'D'), (15, 13, 'e', 'D'), (15, 15, 'e', 'D'),
+    # Sweater knit pattern dots: only on light-pink 'D' (sweater)
+    (18, 9, 'd', 'D'), (18, 15, 'd', 'D'),
+    (20, 9, 'd', 'D'), (20, 15, 'd', 'D'),
+    # Jean seam highlights: only on jean pixels ('r' navy)
+    (26, 5, 'D', 'r'), (26, 13, 'D', 'r'),
+]
+KAREN_A = _patch_sprite(_double_sprite(_KAREN_A_SRC), _KAREN_DETAIL)
+KAREN_B = _patch_sprite(_double_sprite(_KAREN_B_SRC), _KAREN_DETAIL)
 
 # Per-level enemy frames. Spawn logic, collision, AI all stay the same;
 # only the rendered sprite changes.
@@ -482,74 +661,193 @@ LEVEL_ENEMIES = {
 }
 
 # ---- PANCAKES: black-and-white French bulldogs replace enemies, hearts
-# replace pellets. Activate with `python3 game.py --pancakes`. Sprite uses
-# 'b' (boots near-black) for spots and '8' (floppy white) for the white
-# coat -- neither is overridden by any level theme so dogs stay
-# black-and-white in all 3 worlds. 'M' is the existing mouth red,
-# perfect for tongue-out.
-# Side-profile black Frenchie (faces right by default; existing flip
-# logic mirrors it when walking left). Tail nub on the left, head +
-# bat ears on the right, long flat back between them, white chest
-# patch under the throat, two visible legs.
-# Side-profile Frenchie at 16x18. Bigger than the 12x16 ENEMY collision
-# footprint (centered, paws bottom-aligned at render time) so we can
-# fit real Frenchie features: large pointy bat ears at the top of the
-# head, smushed black face with a bright eye, stocky barrel body with
-# a small white chest patch under the throat, tail nub at the rear,
-# and four short legs visible in side profile.
-FRENCHIE_A = [
-    "............b.b.",   # 0:  ear tips
-    "...........bbbbb",   # 1:  ears 5 wide
-    "..........bbbbb.",   # 2:  ears tapering down toward the head
-    ".........bbbbbb.",   # 3:  ear bases settling onto the head
-    "........bbbbbbbb",   # 4:  head top
-    "........bbb8bbbb",   # 5:  bright eye highlight (col 11)
-    "........bbbbbbbb",   # 6:  forehead / smushed snout
-    ".........bbbbbb.",   # 7:  jaw / chin (slight under-curve)
-    "...bb..bbbbbbbbb",   # 8:  tail nub on the left + neck/shoulders
-    "..bbbbbbbbbbbbbb",   # 9:  back of body
-    ".bbbbbbbbbbbbbbb",   # 10: barrel body
-    "bbbbbbbbbbb8888b",   # 11: WHITE CHEST PATCH (front of body, near throat)
-    "bbbbbbbbbbbbbbbb",   # 12: body
-    ".bbbbbbbbbbbbbbb",   # 13: body bottom (curving back in)
-    "................",   # 14: leg gap
-    "..bb.....bbb....",   # 15: rear leg (slim) + front leg (thicker, closer)
-    "..bb.....bbb....",   # 16: legs continued
-    "..ii.....iii....",   # 17: paws
-]
-FRENCHIE_B = [
-    "............b.b.",
-    "...........bbbbb",
-    "..........bbbbb.",
-    ".........bbbbbb.",
-    "........bbbbbbbb",
-    "........bbb8bbbb",
-    "........bbbbbbbb",
-    ".........bbbbbb.",
-    "...bb..bbbbbbbbb",
-    "..bbbbbbbbbbbbbb",
-    ".bbbbbbbbbbbbbbb",
-    "bbbbbbbbbbb8888b",
-    "bbbbbbbbbbbbbbbb",
-    ".bbbbbbbbbbbbbbb",
-    "................",
-    ".bbb.....bb.....",   # weight shifted: rear thicker, front slimmer
-    ".bbb.....bb.....",
-    ".iii.....ii.....",
-]
+# replace pellets. Activate with `python3 game.py --pancakes`. The sprite
+# is HIRES (32x36 char grid) -- when blit_sprite is called with
+# hires=True, each char renders 1:1 at canvas resolution rather than
+# the default PIXEL_SCALE upscale, so we get 16-bit detail in the
+# same physical footprint as a 16x18 8-bit sprite.
+#
+# Sprite uses 'b' (boots near-black) for the coat and '8' (floppy
+# white) for the chest patch -- neither is overridden by any level
+# theme, so the dogs stay black-and-white across all three worlds.
+# 'i' (enemy shadow) is used for the paws so they read as a slightly
+# different tone than the body. In honor of Pancake Waffles, a very
+# good girl.
+#
+# Layout (32 wide x 36 tall):
+#   * Rows 0-7:   bat ears (front ear larger / further right, back
+#                 ear smaller / further left -- both visible from
+#                 the side gives the recognizable Frenchie outline).
+#   * Rows 6-15:  head with smushed snout. Eye is a 3x3 sclera/pupil
+#                 carved into the right half of the face, around col
+#                 26 row 12.
+#   * Rows 16-19: neck/shoulders blending the head into the body, plus
+#                 the small tail nub at the upper-left edge.
+#   * Rows 20-28: barrel body with a white chest patch ('8') tucked
+#                 under the throat.
+#   * Rows 29-34: leg gap + four short legs (rear left, front right)
+#                 with paws on the bottom row.
+#
+# FRENCHIE_A and FRENCHIE_B differ only in leg position (slight stride
+# shift) so the dog reads as walking, not gliding.
+FRENCHIE_LOGICAL_W = 16   # world units occupied by the rendered sprite
+FRENCHIE_LOGICAL_H = 18
 
-# 5x5 heart pellet for Pancakes. 'R' is rubber-band red (always defined,
-# never retinted), 'l' is the bright powerup core for a soft highlight.
+# The new Frenchie is built programmatically using _ellipse / _rect so
+# the proportions are deliberate rather than mis-counted-pixel
+# guesswork. Real-Frenchie reference points the design hits:
+#   * BIG bat ears, very tall and pointy, on top of the head
+#   * Head dominant in size relative to body (Frenchies are head-heavy)
+#   * BIG buggy eye (5x4 sclera with a dark pupil and shine dot)
+#   * Smushed face -- short snout, slight nose bump on the right
+#   * Stocky body, not elongated
+#   * Defined white chest patch (Pancake Waffles' iconic marking)
+#   * Stout 5-wide legs (chunky, not stick-thin)
+#   * Pink ear interior ('M' = mouth red works) so the ears don't
+#     read as solid black blobs
+def _build_frenchie(stride=0):
+    """Generate a 32x36 hires Frenchie sprite. stride=0 / stride=1
+    pick the leg position for the two animation frames."""
+    rows = [['.'] * 32 for _ in range(36)]
+
+    # ---- Body: oval, more compact ----
+    _ellipse(rows, 13, 25, 12, 6, 'b')
+
+    # ---- Head: large round, dominates the right side ----
+    _ellipse(rows, 22, 14, 9, 9, 'b')
+
+    # ---- Smushed snout bump (the small forward-pop of nose) ----
+    _ellipse(rows, 30, 17, 2, 2, 'b')
+
+    # ---- Front bat ear (right ear, big and pointy) ----
+    # Pyramid 9 rows tall, base 9 wide, apex at col 26 row 0
+    front_ear = [
+        (26, 1),   # row 0: 1 px tip
+        (25, 3),   # row 1: 3 px
+        (24, 4),   # row 2: 4 px
+        (24, 5),   # row 3: 5 px
+        (23, 6),   # row 4: 6 px
+        (22, 7),   # row 5: 7 px
+        (22, 8),   # row 6: 8 px
+        (21, 9),   # row 7: 9 px (merging into head)
+        (20, 9),   # row 8: 9 px (base merging)
+    ]
+    for y, (start, w) in enumerate(front_ear):
+        for k in range(w):
+            x = start + k
+            if 0 <= x < 32:
+                rows[y][x] = 'b'
+
+    # ---- Back bat ear (left ear, smaller, partly behind front ear) ----
+    back_ear = [
+        (18, 1),   # row 1
+        (18, 2),   # row 2
+        (17, 3),   # row 3
+        (16, 4),   # row 4
+        (16, 5),   # row 5: base
+        (15, 6),   # row 6
+    ]
+    for i, (start, w) in enumerate(back_ear):
+        y = i + 1
+        for k in range(w):
+            x = start + k
+            if 0 <= x < 32 and 0 <= y < 36 and rows[y][x] == '.':
+                rows[y][x] = 'b'
+
+    # ---- Pink ear interior on the front ear (Frenchie ears are
+    # famously translucent pink inside) ----
+    pink_interior = [
+        (27, 1),   # row 3: 1 px
+        (26, 3),   # row 4: 3 px
+        (26, 4),   # row 5: 4 px
+        (26, 4),   # row 6: 4 px
+    ]
+    for i, (start, w) in enumerate(pink_interior):
+        y = i + 3
+        for k in range(w):
+            x = start + k
+            if 0 <= x < 32 and 0 <= y < 36 and rows[y][x] == 'b':
+                rows[y][x] = 'M'
+
+    # ---- BIG buggy EYE: 5w x 4h sclera, 2x2 pupil, 1px shine ----
+    for y in range(13, 17):
+        for x in range(20, 25):
+            if rows[y][x] == 'b':
+                rows[y][x] = '8'
+    for y in range(14, 16):
+        for x in range(22, 24):
+            if rows[y][x] == '8':
+                rows[y][x] = 'E'   # pupil
+    rows[14][22] = '8'             # catchlight in pupil
+
+    # ---- Nose: a darker dot at the snout tip ----
+    if 0 <= 17 < 36 and 0 <= 30 < 32 and rows[17][30] == 'b':
+        rows[17][30] = 'i'
+
+    # ---- Mouth: tiny tongue tip ('M' = mouth red) ----
+    rows[19][28] = 'M'
+    rows[19][29] = 'M'
+
+    # ---- Cheek shadow under the eye (subtle): use 'i' (enemy
+    # shadow, near-black) only if landing on body 'b' ----
+    if rows[17][20] == 'b':
+        rows[17][20] = 'i'
+
+    # ---- White chest patch: Pancake Waffles' iconic marking,
+    # an oval at the front-bottom of the body, under the throat ----
+    _ellipse(rows, 21, 27, 5, 3, '8')
+
+    # ---- Tail nub at the rear of the body ----
+    _rect(rows, 0, 22, 3, 2, 'b')
+
+    # ---- Legs: chunky 5-wide stout legs, two visible from the side.
+    # The stride parameter shifts them subtly between frames so the
+    # animation loop reads as walking. ----
+    if stride == 0:
+        rear_x, front_x = 4, 18
+    else:
+        rear_x, front_x = 5, 17
+    leg_w = 5
+
+    # Carve the leg gap and place legs (and paws on row 34)
+    for y in range(31, 36):
+        for x in range(32):
+            in_rear = rear_x <= x < rear_x + leg_w
+            in_front = front_x <= x < front_x + leg_w
+            if y < 34:
+                rows[y][x] = 'b' if (in_rear or in_front) else '.'
+            elif y == 34:
+                rows[y][x] = 'i' if (in_rear or in_front) else '.'
+            else:
+                rows[y][x] = '.'
+
+    return [''.join(r) for r in rows]
+
+
+FRENCHIE_A = _build_frenchie(stride=0)
+FRENCHIE_B = _build_frenchie(stride=1)
+
+# 10x10 hires heart pellet for Pancakes. Renders at 1:1 canvas
+# resolution (hires=True) so it occupies a 5x5 world footprint -- same
+# size as the original 5x5 8-bit HEART, but with double the linear
+# resolution. 'R' is rubber-band red (always defined), '8' is floppy
+# white for the highlight, 'M' is mouth red (deeper red) for the
+# heart's outline shadow.
 HEART = [
-    ".R.R.",
-    "RlRRR",
-    "RRRRR",
-    ".RRR.",
-    "..R..",
+    ".RRR..RRR.",
+    "RRRRRRRRRR",
+    "R8RRRRRRRR",
+    "R8RRRRRRRR",
+    "RRRRRRRRRR",
+    ".RRRRRRRR.",
+    "..RRRRRR..",
+    "...RRRR...",
+    "....RR....",
+    "..........",
 ]
 
-# 10x9 crate decoration
-CRATE = [
+# 10x9 wood crate. Hires (20x18) adds plank seams and nail-head dots.
+_CRATE_SRC = [
     "cccccccccc",
     "cCCCCCCCCc",
     "cCXCCCCXCc",
@@ -560,11 +858,22 @@ CRATE = [
     "cCCCCCCCCc",
     "XXXXXXXXXX",
 ]
+CRATE_LOGICAL_W = 10
+CRATE_LOGICAL_H = 9
+_CRATE_DETAIL = [
+    # Plank seam: only on the light-wood top band ('c')
+    (1, 5, 'X', 'c'), (1, 13, 'X', 'c'),
+    # Nail-head shadows: only on the existing wood pixels
+    (3, 1, 'X', 'cC'), (3, 18, 'X', 'cC'),
+    (15, 1, 'X', 'cC'), (15, 18, 'X', 'cC'),
+    # Wood grain darker streaks: only on mid-wood 'C'
+    (5, 9, 'X', 'C'), (9, 11, 'X', 'C'), (13, 7, 'X', 'C'),
+]
+CRATE = _patch_sprite(_double_sprite(_CRATE_SRC), _CRATE_DETAIL)
 
-# 10x9 server-rack chunk -- the level-2 obstacle. Same footprint as a CRATE
-# so the existing collision math works unchanged. Status LEDs alternate.
-# 'h' (ground deep) is dark grey, 'X' is darker, 'C' is mid-tone.
-SERVER_RACK = [
+# 10x9 server rack. Hires adds rack-unit seams and bright LED dots
+# alternating green/red along the front face.
+_SERVER_RACK_SRC = [
     "XXXXXXXXXX",
     "XCCCCCCCCX",
     "XCXCCCCXCX",
@@ -575,28 +884,53 @@ SERVER_RACK = [
     "XCCCCCCCCX",
     "XXXXXXXXXX",
 ]
-
-# 10x9 office chair -- the level-3 obstacle. Front view: tall padded
-# backrest, wide cushioned seat, post + 5-wheel spider base.
-# Designed for visibility at game scale: the silhouette pops against
-# the beige cubicle wall.
-OFFICE_CHAIR = [
-    "...XXXX...",   # top of the headrest
-    "..XCCCCX..",   # headrest narrowing into the back
-    ".XCccccCX.",   # backrest top (mesh fabric highlight)
-    ".XCccccCX.",
-    ".XCccccCX.",
-    ".XCccccCX.",
-    "XCCCCCCCCX",   # shoulders / lumbar
-    "XccccccccX",   # seat cushion (collision top)
-    "XccccccccX",   # under-seat
-    "....XX....",   # gas-lift post
-    "X..XXXX..X",   # 5-spoke wheel base
-    "..........",   # 1-px gap to the carpet
+SERVER_RACK_LOGICAL_W = 10
+SERVER_RACK_LOGICAL_H = 9
+_SERVER_RACK_DETAIL = [
+    # Status LEDs: only place on 'C' (mid-grey rack interior), not
+    # on the 'X' frame edges where they'd cover the dark trim.
+    (3, 4, 'V', 'C'), (3, 14, 'V', 'C'),
+    (7, 4, 'D', 'C'), (7, 14, 'D', 'C'),
+    (11, 4, 'V', 'C'), (11, 14, 'V', 'C'),
+    (15, 4, 'D', 'C'), (15, 14, 'D', 'C'),
+    # Inner-edge rack highlights (only on dark frame 'X')
+    (1, 1, 'C', 'X'), (1, 18, 'C', 'X'),
+    (16, 1, 'C', 'X'), (16, 18, 'C', 'X'),
 ]
+SERVER_RACK = _patch_sprite(_double_sprite(_SERVER_RACK_SRC), _SERVER_RACK_DETAIL)
 
-# 5x6 floppy disk pickup
-FLOPPY = [
+# 10x12 office chair. Hires (20x24) adds mesh-fabric weave and
+# wheelbase shadow.
+_OFFICE_CHAIR_SRC = [
+    "...XXXX...",
+    "..XCCCCX..",
+    ".XCccccCX.",
+    ".XCccccCX.",
+    ".XCccccCX.",
+    ".XCccccCX.",
+    "XCCCCCCCCX",
+    "XccccccccX",
+    "XccccccccX",
+    "....XX....",
+    "X..XXXX..X",
+    "..........",
+]
+OFFICE_CHAIR_LOGICAL_W = 10
+OFFICE_CHAIR_LOGICAL_H = 12
+_OFFICE_CHAIR_DETAIL = [
+    # Mesh fabric weave: only on the 'c' light-mesh interior
+    (5, 6, 'C', 'c'), (5, 12, 'C', 'c'),
+    (7, 8, 'C', 'c'), (7, 14, 'C', 'c'),
+    (9, 6, 'C', 'c'), (9, 12, 'C', 'c'),
+    (11, 8, 'C', 'c'), (11, 14, 'C', 'c'),
+    # Cushion piping highlight: only on cushion 'c'
+    (15, 5, 'C', 'c'), (15, 14, 'C', 'c'),
+]
+OFFICE_CHAIR = _patch_sprite(_double_sprite(_OFFICE_CHAIR_SRC), _OFFICE_CHAIR_DETAIL)
+
+# 5x6 floppy disk -> 10x12 hires. Adds notched corner + label-line
+# definition.
+_FLOPPY_SRC = [
     "77997",
     "77777",
     "78887",
@@ -604,21 +938,38 @@ FLOPPY = [
     "78887",
     "77777",
 ]
+FLOPPY_LOGICAL_W = 5
+FLOPPY_LOGICAL_H = 6
+_FLOPPY_DETAIL = [
+    # Label highlight strokes: only on the white label '8'
+    (5, 3, '9', '8'), (7, 3, '9', '8'),
+    # Slider notch: only on the existing slider '9'
+    (1, 5, '7', '9'),
+]
+FLOPPY = _patch_sprite(_double_sprite(_FLOPPY_SRC), _FLOPPY_DETAIL)
 
-# 5x5 RAPID powerup -- glowing orb
-POWERUP_RAPID = [
+# 5x5 RAPID powerup -> 10x10 hires. Glowing orb with subtle inner ring.
+_POWERUP_RAPID_SRC = [
     ".ZZZ.",
     "ZyyyZ",
     "ZylyZ",
     "ZyyyZ",
     ".ZZZ.",
 ]
+POWERUP_RAPID_LOGICAL_W = 5
+POWERUP_RAPID_LOGICAL_H = 5
+_POWERUP_DETAIL = [
+    # Inner ring shadow: only on outer-glow 'Z'
+    (3, 3, 'y', 'Z'), (3, 6, 'y', 'Z'),
+    (6, 3, 'y', 'Z'), (6, 6, 'y', 'Z'),
+    # Sparkle highlight in the core: only on existing 'y' mid-glow
+    (4, 5, 'l', 'y'), (5, 4, 'l', 'y'),
+]
+POWERUP_RAPID = _patch_sprite(_double_sprite(_POWERUP_RAPID_SRC), _POWERUP_DETAIL)
 
-# 12x6 delivery quadcopter. Top + bottom rotors with horizontal arms;
-# the body in the middle has two "camera" eyes. Two animation frames
-# alternate the rotor blade orientation so they look like they're
-# spinning.
-DRONE_A = [
+# 12x6 quadcopter -> 24x12 hires. Adds rotor-tip highlights and a
+# camera-lens dot in the body.
+_DRONE_A_SRC = [
     "QQ........QQ",
     ".QQ......QQ.",
     "..$$$$$$$$..",
@@ -626,7 +977,7 @@ DRONE_A = [
     ".QQ......QQ.",
     "QQ........QQ",
 ]
-DRONE_B = [
+_DRONE_B_SRC = [
     ".QQ......QQ.",
     "QQ........QQ",
     "..$$$$$$$$..",
@@ -634,19 +985,27 @@ DRONE_B = [
     "QQ........QQ",
     ".QQ......QQ.",
 ]
-
-# Three 7x6 weapon crates: each visually hints at the weapon's effect.
-# RAPID = stacked motion lines (bullet hose). SPREAD = three radiating
-# rays from a central source. PIERCE = horizontal arrow/lance.
-WEAPON_CRATE_RAPID = [    # yellow box, lightning-style stripes
-    "cccccccc"[:7],
-    "cYYYYYYc"[:7],
-    "cZZZZZZc"[:7],
-    "cYYYYYYc"[:7],
-    "cZZZZZZc"[:7],
-    "cccccccc"[:7],
+DRONE_LOGICAL_W = 12
+DRONE_LOGICAL_H = 6
+_DRONE_DETAIL = [
+    # Camera-lens shines: only on existing 'U' lens dots
+    (7, 9, 'l', 'U'), (7, 14, 'l', 'U'),
+    # Body chassis highlight: only on the silver '$'
+    (4, 11, 'Q', '$'), (4, 13, 'Q', '$'),
 ]
-WEAPON_CRATE_SPREAD = [   # cyan-ish box, three rays converging from left
+DRONE_A = _patch_sprite(_double_sprite(_DRONE_A_SRC), _DRONE_DETAIL)
+DRONE_B = _patch_sprite(_double_sprite(_DRONE_B_SRC), _DRONE_DETAIL)
+
+# Three 7x6 weapon crates -> 14x12 hires. Each gets icon-detail polish.
+_WEAPON_CRATE_RAPID_SRC = [
+    "ccccccc",
+    "cYYYYYYc"[:7],
+    "cZZZZZZc"[:7],
+    "cYYYYYYc"[:7],
+    "cZZZZZZc"[:7],
+    "ccccccc",
+]
+_WEAPON_CRATE_SPREAD_SRC = [
     "ccccccc",
     "cd...lc",
     "c.dl..c",
@@ -654,20 +1013,38 @@ WEAPON_CRATE_SPREAD = [   # cyan-ish box, three rays converging from left
     "cd..dlc",
     "ccccccc",
 ]
-WEAPON_CRATE_PIERCE = [   # red box, horizontal arrow inside
+_WEAPON_CRATE_PIERCE_SRC = [
     "ccccccc",
     "cXXXXXc",
     "c.D...c",
     "cDDDDDc",
     "c.D...c",
-    "cccccXc"[:7],
+    "ccccccc",
 ]
+WEAPON_CRATE_LOGICAL_W = 7
+WEAPON_CRATE_LOGICAL_H = 6
+# RAPID: lightning shines on the yellow stripes only
+_WCRATE_RAPID_DETAIL = [
+    (3, 5, 'l', 'Y'), (5, 9, 'l', 'Y'),
+    (7, 5, 'l', 'Y'), (9, 9, 'l', 'Y'),
+]
+# SPREAD: brighten the rays only on existing 'd'/'D' pixels
+_WCRATE_SPREAD_DETAIL = [
+    (3, 9, 'l', 'dD'), (5, 7, 'l', 'dD'), (7, 11, 'l', 'dD'),
+]
+# PIERCE: arrow stripe definition
+_WCRATE_PIERCE_DETAIL = [
+    (5, 11, 'D', 'D'), (7, 11, 'D', 'D'),
+]
+WEAPON_CRATE_RAPID = _patch_sprite(_double_sprite(_WEAPON_CRATE_RAPID_SRC), _WCRATE_RAPID_DETAIL)
+WEAPON_CRATE_SPREAD = _patch_sprite(_double_sprite(_WEAPON_CRATE_SPREAD_SRC), _WCRATE_SPREAD_DETAIL)
+WEAPON_CRATE_PIERCE = _patch_sprite(_double_sprite(_WEAPON_CRATE_PIERCE_SRC), _WCRATE_PIERCE_DETAIL)
 # Backwards-compat: old name still referenced by some code paths
 WEAPON_CRATE = WEAPON_CRATE_RAPID
 
-# 7x9 SSL cert: a golden padlock with a tiny "SSL" plate. Drops when
-# the boss dies and ends the level when the player walks over it.
-SSL_CERT = [
+# 7x9 SSL cert -> 14x18 hires. Adds shackle highlight and 'SSL' plate
+# definition.
+_SSL_CERT_SRC = [
     ".UUUUU.",   # padlock shackle top
     ".U...U.",
     ".U...U.",
@@ -678,6 +1055,19 @@ SSL_CERT = [
     "UeevveU",
     "UUUUUUU",
 ]
+SSL_CERT_LOGICAL_W = 7
+SSL_CERT_LOGICAL_H = 9
+_SSL_CERT_DETAIL = [
+    # Shackle top highlight: only on existing 'U' shackle pixels
+    (0, 5, 'S', 'U'), (0, 9, 'S', 'U'),
+    # Plate corner highlights: only on 'U' frame
+    (8, 5, 'S', 'U'), (8, 9, 'S', 'U'),
+    # Glow at the SSL letterform center: only on existing 'S'
+    (10, 6, 'l', 'S'), (10, 7, 'l', 'S'),
+    # Rim shadow: only on outer 'U' edge
+    (16, 1, 'v', 'U'), (16, 12, 'v', 'U'),
+]
+SSL_CERT = _patch_sprite(_double_sprite(_SSL_CERT_SRC), _SSL_CERT_DETAIL)
 
 # Bosses are 24x32 hand-built sprites, one per level. Footprint and HP
 # are shared across the three; the visuals (and per-level theme tint)
@@ -689,24 +1079,6 @@ BOSS_H = 32
 BOSS_HP = 8
 BOSS_PX_PER_SEC = 18.0
 BOSS_TINT = (255, 255, 255, 255)   # default no-op tint; level themes set the real one
-
-
-def _ellipse(rows, cx, cy, rx, ry, ch):
-    """Fill an ellipse on a 2D char grid (mutates rows in place)."""
-    H, W = len(rows), len(rows[0])
-    for y in range(H):
-        for x in range(W):
-            d = ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2
-            if d <= 1.0:
-                rows[y][x] = ch
-
-
-def _rect(rows, x0, y0, w, h, ch):
-    H, W = len(rows), len(rows[0])
-    for y in range(y0, y0 + h):
-        for x in range(x0, x0 + w):
-            if 0 <= x < W and 0 <= y < H:
-                rows[y][x] = ch
 
 
 def _build_jobba():
@@ -839,13 +1211,48 @@ def _build_office_manager():
     return [''.join(r) for r in rows]
 
 
-JOBBA_BOSS         = _build_jobba()
-CABLE_BUNDLE_BOSS  = _build_cable_bundle()
-OFFICE_MANAGER_BOSS = _build_office_manager()
+# Bosses are built at the original 24x32 char grid using the
+# programmatic helpers above, then doubled to 48x64 hires for the
+# 16-bit upgrade. BOSS_W / BOSS_H stay at 24/32 (world-coord values
+# used for collision and on-screen culling); the sprite art occupies
+# a 48x64 char grid that renders at 1:1 canvas pixels (hires=True).
+# Detail patches sprinkle in extra highlights / pin-prick details
+# that the doubled grid has the budget for.
+_JOBBA_BOSS_DETAIL = [
+    # Extra body-highlight specks: only on existing slug body '+'
+    (28, 12, '?', '+'), (35, 28, '?', '+'), (45, 18, '?', '+'),
+    # Catchlights in each eye: only on existing 'V' eye pixels
+    (13, 16, 'l', 'V'), (13, 17, 'l', 'V'),
+    (13, 30, 'l', 'V'), (13, 31, 'l', 'V'),
+    # Mouth tooth: only on existing 'm' mouth pixels
+    (21, 20, '8', 'm'), (21, 28, '8', 'm'),
+]
+_CABLE_BUNDLE_DETAIL = [
+    # Cable strand glints: only on the dark cable '0' or '1'
+    (10, 18, '1', '01'), (24, 36, '1', '01'), (32, 22, '1', '01'),
+    # Red-eye highlights: only on existing red-eye '3' pixels
+    (24, 19, 'l', '3'), (24, 31, 'l', '3'),
+]
+_OFFICE_MANAGER_DETAIL = [
+    # Glasses lens shine: only on the lens 'L'
+    (12, 19, '8', 'L'), (12, 27, '8', 'L'),
+    # Bald-spot highlight: only on hair 'H'
+    (5, 22, 's', 'H'),
+    # Tie sheen: only on the red tie '6'
+    (32, 25, 'l', '6'), (38, 25, 'l', '6'),
+    # Suit lapel highlight: only on suit '4'
+    (29, 19, '5', '4'), (29, 30, '5', '4'),
+    # Belt buckle: only on suit '4' so it lands on the actual belt area
+    (44, 24, 'e', '4'), (44, 25, 'e', '4'),
+]
+JOBBA_BOSS          = _patch_sprite(_double_sprite(_build_jobba()), _JOBBA_BOSS_DETAIL)
+CABLE_BUNDLE_BOSS   = _patch_sprite(_double_sprite(_build_cable_bundle()), _CABLE_BUNDLE_DETAIL)
+OFFICE_MANAGER_BOSS = _patch_sprite(_double_sprite(_build_office_manager()), _OFFICE_MANAGER_DETAIL)
 BOSS_SPRITES = {1: JOBBA_BOSS, 2: CABLE_BUNDLE_BOSS, 3: OFFICE_MANAGER_BOSS}
 
-# 4x6 torch (wall sconce)
-TORCH = [
+# 4x6 torch -> 8x12 hires. Adds inner flame core glow and a flicker
+# tongue at the very top.
+_TORCH_SRC = [
     ".YY.",
     "YfYf",
     "fYfY",
@@ -853,6 +1260,16 @@ TORCH = [
     ".WW.",
     ".WW.",
 ]
+TORCH_LOGICAL_W = 4
+TORCH_LOGICAL_H = 6
+_TORCH_DETAIL = [
+    # Bright core: only inside flame ('Y' or 'f')
+    (1, 3, 'l', 'Yf'), (1, 4, 'l', 'Yf'),
+    (3, 4, 'Y', 'f'), (3, 5, 'Y', 'f'),
+    # Wood-grain shadow on the sconce stem: only on actual wood 'W'
+    (9, 3, 'w', 'W'), (11, 3, 'w', 'W'),
+]
+TORCH = _patch_sprite(_double_sprite(_TORCH_SRC), _TORCH_DETAIL)
 
 # 5x7 pixel font for HUD, taunts.
 def _g(*rows):
@@ -914,17 +1331,32 @@ FONT = {
 # Framebuffer + half-block renderer
 # ===================================================================
 class Framebuffer:
-    """Thin wrapper over a pygame Surface that exposes the same drawing
-    API the rest of the game already calls (set / fill_rect / blit_sprite
-    / blit_text / blit_text_scaled). Drawing happens at the internal
-    resolution; main() scales the surface to the window once per frame.
+    """Thin wrapper over a pygame Surface. Logical drawing happens in
+    world coordinates (160x80); the underlying canvas is PIXEL_SCALE
+    times bigger (320x160) so we get 16-bit pixel density. Every
+    drawing call multiplies its coords/sizes by PIXEL_SCALE, so the
+    rest of the game can keep using world-coord ints unchanged.
+
+    Sprite rendering supports two modes:
+      * default (hires=False): sprite chars are 1 world pixel each,
+        each char is upscaled to a PIXEL_SCALE x PIXEL_SCALE canvas
+        block at render time. Output is bit-identical to the v0.9
+        game.
+      * hires=True: sprite chars are 0.5 world pixels each (the char
+        grid is twice as dense), so the sprite renders 1:1 at canvas
+        resolution. The sprite's logical world footprint stays the
+        same as the equivalent 8-bit sprite, but it carries 4x as
+        much detail.
     """
     __slots__ = ("w", "h", "surface", "_sprite_cache", "_cache_version")
 
     def __init__(self, w, h):
+        # w, h are world dimensions; the surface itself is PIXEL_SCALE
+        # times each. Game code reads .w / .h as visible-area extents
+        # in world units, which is exactly what we want.
         self.w = w
         self.h = h
-        self.surface = pygame.Surface((w, h))
+        self.surface = pygame.Surface((w * PIXEL_SCALE, h * PIXEL_SCALE))
         self._sprite_cache = {}  # id(sprite_rows) -> (right_facing, left_facing)
         self._cache_version = _SPRITE_CACHE_VERSION
 
@@ -932,28 +1364,41 @@ class Framebuffer:
         self.surface.fill(color)
 
     def set(self, x, y, color):
+        # One world pixel = a PIXEL_SCALE x PIXEL_SCALE block on the canvas.
         if 0 <= x < self.w and 0 <= y < self.h and color is not None:
-            self.surface.set_at((int(x), int(y)), color)
+            self.surface.fill(
+                color,
+                (int(x) * PIXEL_SCALE, int(y) * PIXEL_SCALE,
+                 PIXEL_SCALE, PIXEL_SCALE),
+            )
 
     def fill_rect(self, x, y, w, h, color):
         if color is None:
             return
         # pygame clips automatically.
-        self.surface.fill(color, (int(x), int(y), int(w), int(h)))
+        self.surface.fill(
+            color,
+            (int(x) * PIXEL_SCALE, int(y) * PIXEL_SCALE,
+             int(w) * PIXEL_SCALE, int(h) * PIXEL_SCALE),
+        )
 
-    def blit_sprite(self, sprite_rows, x0, y0, palette=PAL, flip=False):
+    def blit_sprite(self, sprite_rows, x0, y0, palette=PAL, flip=False, hires=True):
+        # All gameplay sprites are now stored hires (each char = 1 canvas
+        # pixel). hires=False is retained for completeness but unused
+        # by current code -- it would render an 8-bit char-grid sprite
+        # at PIXEL_SCALE upscale, the v0.9 behavior.
         # Invalidate the cache when the global palette changes (level transition)
         if self._cache_version != _SPRITE_CACHE_VERSION:
             self._sprite_cache.clear()
             self._cache_version = _SPRITE_CACHE_VERSION
-        key = id(sprite_rows)
+        key = (id(sprite_rows), bool(hires))
         cached = self._sprite_cache.get(key)
         if cached is None:
-            cached = (_make_sprite_surface(sprite_rows, palette),
-                      _make_sprite_surface(sprite_rows, palette, flip=True))
+            cached = (_make_sprite_surface(sprite_rows, palette, hires=hires),
+                      _make_sprite_surface(sprite_rows, palette, flip=True, hires=hires))
             self._sprite_cache[key] = cached
         surf = cached[1] if flip else cached[0]
-        self.surface.blit(surf, (int(x0), int(y0)))
+        self.surface.blit(surf, (int(x0) * PIXEL_SCALE, int(y0) * PIXEL_SCALE))
 
     def blit_text(self, text, x0, y0, color, spacing=1):
         """Render uppercase text using FONT (5x7 glyphs)."""
@@ -986,19 +1431,28 @@ class Framebuffer:
         return n * 5 * scale + max(0, n - 1) * spacing * scale
 
 
-def _make_sprite_surface(sprite_rows, palette=PAL, flip=False):
-    """Convert a char-grid sprite to a pygame Surface with per-pixel alpha
-    (any palette key whose color is None becomes transparent)."""
+def _make_sprite_surface(sprite_rows, palette=PAL, flip=False, hires=True):
+    """Convert a char-grid sprite to a pygame Surface with per-pixel
+    alpha. When hires=True (default), each char becomes one canvas
+    pixel -- the standard path now that all gameplay sprites are
+    stored at hires density. When hires=False, each char becomes a
+    PIXEL_SCALE x PIXEL_SCALE block (the v0.9 8-bit auto-upscale
+    path, retained but unused by current code)."""
     h = len(sprite_rows)
     w = len(sprite_rows[0])
-    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    block = 1 if hires else PIXEL_SCALE
+    surf = pygame.Surface((w * block, h * block), pygame.SRCALPHA)
     for y, row in enumerate(sprite_rows):
         if flip:
             row = row[::-1]
         for x, ch in enumerate(row):
             color = palette.get(ch)
-            if color is not None:
+            if color is None:
+                continue
+            if block == 1:
                 surf.set_at((x, y), color)
+            else:
+                surf.fill(color, (x * block, y * block, block, block))
     return surf
 
 
@@ -1379,7 +1833,7 @@ class World:
         self.camera_x = 0.0
         self.ground_y = int(h * 0.78)
         self.player_x = PLAYER_MIN_X + 4
-        self.player_y = self.ground_y - len(NERD)
+        self.player_y = self.ground_y - NERD_LOGICAL_H
         self.player_vy = 0.0
         self.player_grounded = True
         self.player_face_right = True
@@ -1453,10 +1907,10 @@ class World:
         # (vs 9 for crates / racks) so the silhouette pops as something
         # the player has to clear. Single-stack only on level 3 since
         # 24-px (2 stacked chairs) sits right at max jump height.
-        crate_w = len(CRATE[0])
-        crate_h = len(CRATE)             # 9 -- collision unit for L1/L2
+        crate_w = CRATE_LOGICAL_W
+        crate_h = CRATE_LOGICAL_H             # 9 -- collision unit for L1/L2
         if self.level == 3:
-            obstacle_h = len(OFFICE_CHAIR)   # 12
+            obstacle_h = OFFICE_CHAIR_LOGICAL_H   # 12
             obstacle_stack_choices = [1]
         else:
             obstacle_h = crate_h
@@ -1547,7 +2001,7 @@ class World:
 
     def grounded_y(self):
         # y position of player_y when standing on the floor at the current x.
-        return self._floor_top_at(self.player_x) - len(NERD)
+        return self._floor_top_at(self.player_x) - NERD_LOGICAL_H
 
     def _player_bbox(self, x=None, y=None):
         if x is None: x = self.player_x
@@ -1642,7 +2096,7 @@ class World:
             play("lose")
             return
         self.player_x = self.last_safe_x
-        self.player_y = self._floor_top_at(self.last_safe_x) - len(NERD)
+        self.player_y = self._floor_top_at(self.last_safe_x) - NERD_LOGICAL_H
         self.player_vy = 0.0
         self.player_grounded = True
         self.last_hit = time.time()       # i-frames after respawn
@@ -1701,7 +2155,7 @@ class World:
         self.boss_announced = False
         self.ssl_cert = None
         self.player_x = float(PLAYER_MIN_X + 4)
-        self.player_y = self.ground_y - len(NERD)
+        self.player_y = self.ground_y - NERD_LOGICAL_H
         self.player_vy = 0.0
         self.player_grounded = True
         self.camera_x = 0.0
@@ -1814,13 +2268,13 @@ class World:
             self.player_vy += GRAVITY_PX_PER_SEC2 * dt
             new_y = self.player_y + self.player_vy * dt
             if self.player_vy > 0:  # falling: try to land on the highest surface
-                old_feet = self.player_y + len(NERD)
-                new_feet = new_y + len(NERD)
+                old_feet = self.player_y + NERD_LOGICAL_H
+                new_feet = new_y + NERD_LOGICAL_H
                 floor = self._floor_top_at(self.player_x)
                 # Allow crossing several pixels of floor in a single frame so
                 # we still catch the surface when vy*dt is large.
                 if new_feet >= floor and old_feet <= floor + 4:
-                    self.player_y = floor - len(NERD)
+                    self.player_y = floor - NERD_LOGICAL_H
                     self.player_vy = 0.0
                     self.player_grounded = True
                 else:
@@ -1829,7 +2283,7 @@ class World:
                 self.player_y = new_y
         else:
             # Walked off an edge? If so, switch to falling.
-            if self.player_y < self._floor_top_at(self.player_x) - len(NERD):
+            if self.player_y < self._floor_top_at(self.player_x) - NERD_LOGICAL_H:
                 self.player_grounded = False
 
         # ---- safe-ground tracking + fall death ----
@@ -1873,7 +2327,7 @@ class World:
                 # spawn right of the camera, walking LEFT toward the player
                 ex = self.camera_x + self.fb_w + 4
                 vx = -speed_mag
-            ey = self.ground_y - len(ENEMY_A)
+            ey = self.ground_y - ENEMY_LOGICAL_H
             self.enemies.append(Enemy(ex, ey, vx))
             self.spawned += 1
             self.next_spawn = now + random.uniform(ENEMY_SPAWN_MIN, ENEMY_SPAWN_MAX)
@@ -1895,8 +2349,8 @@ class World:
 
         # ---- enemies. They block on crates and pits; they reverse direction
         # when they would step into one. ----
-        ENEMY_W = len(ENEMY_A[0])  # 12
-        ENEMY_H = len(ENEMY_A)     # 16
+        ENEMY_W = ENEMY_LOGICAL_W  # 12
+        ENEMY_H = ENEMY_LOGICAL_H     # 16
         for e in self.enemies:
             if not e.alive:
                 continue
@@ -1976,9 +2430,9 @@ class World:
                 pleft   = self.player_x + 2
                 pright  = self.player_x + 12
                 ptop    = self.player_y + 4    # head/torso, not whole sprite
-                pbot    = self.player_y + len(NERD)
+                pbot    = self.player_y + NERD_LOGICAL_H
                 etop    = e.y + 1
-                ebot    = e.y + len(ENEMY_A)
+                ebot    = e.y + ENEMY_LOGICAL_H
                 if (e.x < pright and e.x + 12 > pleft
                         and etop < pbot and ebot > ptop):
                     if time.time() - self.last_hit > HIT_COOLDOWN:
@@ -2162,7 +2616,7 @@ class World:
                 pleft  = self.player_x + 2
                 pright = self.player_x + 12
                 ptop   = self.player_y + 4
-                pbot   = self.player_y + len(NERD)
+                pbot   = self.player_y + NERD_LOGICAL_H
                 if (b.x < pright and b.x + BOSS_W > pleft
                         and b.y + 4 < pbot and b.y + BOSS_H > ptop):
                     if time.time() - self.last_hit > HIT_COOLDOWN:
@@ -2216,8 +2670,8 @@ def render_world(fb, world):
     # Torches sprinkled along the back wall (level 1 only -- the indoor
     # levels have rack LEDs / monitors providing their own ambience).
     if world.level == 1:
-        torch_h = len(TORCH)
-        torch_w = len(TORCH[0])
+        torch_h = TORCH_LOGICAL_H
+        torch_w = TORCH_LOGICAL_W
         for tx_w in world.torches:
             sx = tx_w - cx
             if -torch_w <= sx < fb.w + torch_w:
@@ -2230,10 +2684,20 @@ def render_world(fb, world):
 
     # Obstacles: stack of sprites. Sprite changes per level (crate / server
     # rack / office chair) but the collision footprint stays the same.
-    obstacle_sprite = (CRATE if world.level == 1
-                       else SERVER_RACK if world.level == 2
-                       else OFFICE_CHAIR)
-    crate_h = len(obstacle_sprite)
+    # crate_h is the WORLD-coord height of one sprite tile -- not
+    # len(obstacle_sprite), which now returns the hires char-grid height
+    # (2x world height) and would make 1-stack crates render with n=0
+    # (i.e. invisible, leaving an invisible collision wall == the
+    # 'floating crate' bug).
+    if world.level == 1:
+        obstacle_sprite = CRATE
+        crate_h = CRATE_LOGICAL_H
+    elif world.level == 2:
+        obstacle_sprite = SERVER_RACK
+        crate_h = SERVER_RACK_LOGICAL_H
+    else:
+        obstacle_sprite = OFFICE_CHAIR
+        crate_h = OFFICE_CHAIR_LOGICAL_H
     for ox, oy, ow, oh in world.obstacles:
         sx = ox - cx
         if -ow <= sx < fb.w + ow:
@@ -2284,28 +2748,37 @@ def render_world(fb, world):
             sparkle_y = sc.y + 4 + bob + int(round(2 * math.sin(spark_t)))
             fb.set(sparkle_x, sparkle_y, PAL['S'])
 
-    # Boss (drawn before regular enemies so they overlap correctly)
+    # Boss (drawn before regular enemies so they overlap correctly).
+    # The boss sprite is now hires (48x64 canvas px = 24x32 world px),
+    # but we still go through fb.surface.blit directly (instead of
+    # fb.blit_sprite) so we can apply the 'flash white' tint when the
+    # boss has just been hit. World position must be multiplied by
+    # PIXEL_SCALE to land on the right canvas spot.
     if world.boss is not None and world.boss.alive:
         b = world.boss
         sx = int(b.x) - cx
         if -BOSS_W <= sx < fb.w + BOSS_W:
             surf = _get_overlord_surface(world.level, b.vx < 0)
+            cx_canvas = sx * PIXEL_SCALE
+            cy_canvas = int(b.y) * PIXEL_SCALE
             if time.time() < b.flash_until:
                 # Flash white when hit
                 flash = surf.copy()
                 flash.fill((255, 255, 255, 200), special_flags=pygame.BLEND_RGBA_MULT)
-                fb.surface.blit(flash, (sx, int(b.y)))
+                fb.surface.blit(flash, (cx_canvas, cy_canvas))
             else:
-                fb.surface.blit(surf, (sx, int(b.y)))
+                fb.surface.blit(surf, (cx_canvas, cy_canvas))
 
     # Enemies (back to front by world x). Sprite varies by level:
     # ghouls (L1), CPUs (L2), Karens (L3). Pancakes replaces all of
-    # them with French bulldogs at a larger 16x18 size, centered on
-    # the 12x16 collision box.
+    # them with French bulldogs whose physical footprint is 16x18
+    # world units -- larger than the 12x16 collision box, centered
+    # on it. All sprites are hires; the offset compensates for the
+    # Frenchie's slightly larger world footprint.
     if world.pancakes_mode:
         enemy_a, enemy_b = FRENCHIE_A, FRENCHIE_B
-        sprite_x_offset = -(len(FRENCHIE_A[0]) - len(ENEMY_A[0])) // 2  # -2
-        sprite_y_offset = -(len(FRENCHIE_A) - len(ENEMY_A))             # -2
+        sprite_x_offset = -(FRENCHIE_LOGICAL_W - ENEMY_LOGICAL_W) // 2  # -2
+        sprite_y_offset = -(FRENCHIE_LOGICAL_H - ENEMY_LOGICAL_H)       # -2
     else:
         enemy_a, enemy_b = LEVEL_ENEMIES.get(world.level, (ENEMY_A, ENEMY_B))
         sprite_x_offset = 0
@@ -2326,11 +2799,12 @@ def render_world(fb, world):
                    flip=not world.player_face_right)
 
     # Floating hearts (Pancakes mode) -- they rise from the player when
-    # a Frenchie bumps her (sic).
+    # a Frenchie bumps her (sic). Hires heart is 10x10 chars rendering
+    # to 5x5 world units, same logical footprint as the v0.9 heart.
     for h in world.floating_hearts:
         hx = int(h.x) - cx
         if -8 <= hx < fb.w + 8:
-            fb.blit_sprite(HEART, hx - 2, int(h.y))
+            fb.blit_sprite(HEART, hx - 2, int(h.y), hires=True)
 
     # Pellets. Pancakes renders a heart sprite; everyone else gets the
     # 2x2 ball + glow + trailing streak (PIERCE rounds use a red core).
@@ -2341,9 +2815,10 @@ def render_world(fb, world):
         py = int(p.y)
         sign = -1 if p.vx > 0 else 1
         if world.pancakes_mode:
-            # heart at sprite center (heart is 5x5; offset to align with
-            # original 2x2 core anchor)
-            fb.blit_sprite(HEART, spx - 2, py - 2)
+            # 10x10 hires heart -> 5x5 world footprint, centered on the
+            # 2x2 core anchor (offset -2,-2 keeps the heart visually
+            # centered on the pellet's collision/origin point).
+            fb.blit_sprite(HEART, spx - 2, py - 2, hires=True)
             # tiny pink streak so the heart's velocity reads
             for d in range(1, 4):
                 fb.set(spx + sign * d, py + 1, PAL['M'])
@@ -2828,8 +3303,10 @@ def collect_input():
 
 
 def present(fb, screen):
-    """With pygame.SCALED the screen surface IS at INTERNAL_W x INTERNAL_H,
-    so we just blit straight in and pygame upscales nearest-neighbor."""
+    """With pygame.SCALED the screen surface IS at CANVAS_W x CANVAS_H
+    (the framebuffer canvas size, not the world coord size), so we
+    just blit straight in and pygame upscales nearest-neighbor to the
+    real display."""
     screen.blit(fb.surface, (0, 0))
     pygame.display.flip()
 
@@ -2838,9 +3315,9 @@ def present(fb, screen):
 # Splash screen (pixel-art via framebuffer)
 # ===================================================================
 
-# 14x10 pixel skull (used as splash icon).  Reuses palette: r=red dark,
-# d=red mid, D=red light, V=yellow eye, m=mouth interior, F=glasses frame.
-SKULL = [
+# 14x10 splash skull -> 28x20 hires. Adds eye-socket glints and a
+# sharper jaw outline.
+_SKULL_SRC = [
     "....DDDDDD....",
     "..DddddddddD..",
     ".DddddddddddD.",
@@ -2852,6 +3329,17 @@ SKULL = [
     "...DDDDDDDD...",
     "....DDDDDD....",
 ]
+SKULL_LOGICAL_W = 14
+SKULL_LOGICAL_H = 10
+_SKULL_DETAIL = [
+    # Eye-socket inner glints: only on existing pupil 'E'
+    (7, 5, 'r', 'E'), (7, 21, 'r', 'E'),
+    # Top-of-skull highlight: only on existing skull 'D'
+    (1, 12, 'D', 'D'), (1, 14, 'D', 'D'),
+    # Tooth gaps shadow: only on the mouth 'm' band
+    (12, 11, 'i', 'm'), (12, 16, 'i', 'm'),
+]
+SKULL = _patch_sprite(_double_sprite(_SKULL_SRC), _SKULL_DETAIL)
 
 # 7-row fire gradients (red->yellow and yellow->green) for the title halves.
 FIRE_TOP = [
@@ -2956,10 +3444,14 @@ def render_splash(fb, blink_on):
     if blink_on:
         fb.blit_text(prompt, max(2, (fb.w - pw) // 2), y, (255, 230, 80))
 
-    # CRT scanlines: dim every other row by overlaying a translucent black
-    scanline = pygame.Surface((fb.w, 1), pygame.SRCALPHA)
+    # CRT scanlines: dim every other CANVAS row. Operating at canvas
+    # density rather than world density keeps the scanlines crisp at
+    # 16-bit pixel size. Use surface.get_size() so this Just Works no
+    # matter what PIXEL_SCALE the canvas was built at.
+    canvas_w, canvas_h = fb.surface.get_size()
+    scanline = pygame.Surface((canvas_w, 1), pygame.SRCALPHA)
     scanline.fill((0, 0, 0, 50))   # ~20% darkening
-    for sy in range(1, fb.h, 2):
+    for sy in range(1, canvas_h, 2):
         fb.surface.blit(scanline, (0, sy))
 
     # bezel border (1 pixel)
@@ -2999,13 +3491,15 @@ def splash(fb, screen, clock):
 # ===================================================================
 def make_screen(fullscreen):
     """Open / re-open the display. With pygame.SCALED, pygame handles
-    nearest-neighbor scaling from INTERNAL_W x INTERNAL_H to the actual
-    window/display size, so all our drawing stays at the internal
-    resolution."""
+    nearest-neighbor scaling from CANVAS_W x CANVAS_H (the rendered
+    framebuffer size) to the actual window/display size. The
+    framebuffer renders 16-bit pixels (PIXEL_SCALE per world pixel),
+    so the canvas is 320x160 even though the game's world coordinate
+    system is still 160x80."""
     flags = pygame.SCALED
     if fullscreen:
         flags |= pygame.FULLSCREEN
-    screen = pygame.display.set_mode((INTERNAL_W, INTERNAL_H), flags)
+    screen = pygame.display.set_mode((CANVAS_W, CANVAS_H), flags)
     pygame.display.set_caption(WINDOW_TITLE)
     pygame.mouse.set_visible(False)
     return screen

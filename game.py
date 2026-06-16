@@ -69,7 +69,7 @@ ENEMY_PX_PER_SEC_MAX   = 28.0
 ENEMY_SPAWN_MIN        = 0.9
 ENEMY_SPAWN_MAX        = 2.0
 TOTAL_ENEMIES          = 8
-PLAYER_LIVES           = 3
+PLAYER_MAX_HP          = 6
 HIT_COOLDOWN           = 0.8
 FINAL_LEVEL            = 3   # win the game by clearing this level
 
@@ -1878,7 +1878,7 @@ class World:
         self.disks = 0
         self.disks_total = 0
         self.kills = 0
-        self.lives = PLAYER_LIVES
+        self.hp = PLAYER_MAX_HP
         self.spawned = 0
         self.next_spawn = time.time() + random.uniform(ENEMY_SPAWN_MIN, ENEMY_SPAWN_MAX)
         self.last_shot = 0.0
@@ -2088,21 +2088,12 @@ class World:
         play("shoot")
 
     def _respawn(self):
-        """Send the player back to the last safe ground tile, take a life."""
-        self.lives -= 1
-        if self.lives <= 0:
-            self.state = "lose"
-            self.end_message = random.choice(DEATH_QUOTES)
-            play("lose")
-            return
-        self.player_x = self.last_safe_x
-        self.player_y = self._floor_top_at(self.last_safe_x) - NERD_LOGICAL_H
-        self.player_vy = 0.0
-        self.player_grounded = True
-        self.last_hit = time.time()       # i-frames after respawn
-        self.message = "You fell in. Try harder."
-        self.message_until = time.time() + 1.4
-        play("hit")
+        """Pit falls are fatal regardless of remaining HP -- the void
+        doesn't do chip damage."""
+        self.hp = 0
+        self.state = "lose"
+        self.end_message = random.choice(DEATH_QUOTES)
+        play("lose")
 
     def _maybe_send_drone(self, kill_x, kill_y):
         """25% chance after a ghoul kill: a delivery drone flies in from
@@ -2128,7 +2119,7 @@ class World:
 
     def _advance_level(self):
         """SSL cert claimed -> next level, or final win if we just cleared
-        FINAL_LEVEL. Player progress (lives, disks, weapon timer) carries
+        FINAL_LEVEL. Player progress (hp, disks, weapon timer) carries
         over; kills, enemies, drones, crates, boss, ssl_cert all reset."""
         if self.level >= FINAL_LEVEL:
             self.state = "win"
@@ -2436,7 +2427,7 @@ class World:
                 if (e.x < pright and e.x + 12 > pleft
                         and etop < pbot and ebot > ptop):
                     if time.time() - self.last_hit > HIT_COOLDOWN:
-                        self.lives -= 1
+                        self.hp -= 1
                         self.last_hit = time.time()
                         play("hit")
                         e.alive = False
@@ -2620,7 +2611,7 @@ class World:
                 if (b.x < pright and b.x + BOSS_W > pleft
                         and b.y + 4 < pbot and b.y + BOSS_H > ptop):
                     if time.time() - self.last_hit > HIT_COOLDOWN:
-                        self.lives -= 1
+                        self.hp -= 1
                         self.last_hit = time.time()
                         play("hit")
 
@@ -2629,7 +2620,7 @@ class World:
             self.weapon_kind = "DEFAULT"
 
         # ---- win/lose ----
-        if self.lives <= 0:
+        if self.hp <= 0:
             self.state = "lose"
             self.end_message = random.choice(DEATH_QUOTES)
             play("lose")
@@ -2860,24 +2851,35 @@ def render_world(fb, world):
     weapon_w = (len(weapon_text) * 6 - 1) if weapon_text else 0
     budget = fb.w - 4 - (weapon_w + 4 if weapon_text else 0)
 
+    # HP pip bar takes a fixed width regardless of size tier: "HP " (3 chars
+    # of font) + PLAYER_MAX_HP pips (2 px each + 1 px gap).
+    pip_w, pip_gap = 2, 1
+    hp_label_w = 3 * 6                     # "HP "
+    hp_pips_w = PLAYER_MAX_HP * (pip_w + pip_gap) - pip_gap
+    hp_block_w = hp_label_w + hp_pips_w
     full = (f"KILLS {world.kills}/{TOTAL_ENEMIES}  "
-            f"DISKS {world.disks}/{world.disks_total}  "
-            f"LIVES {world.lives}")
+            f"DISKS {world.disks}/{world.disks_total}  ")
     med  = (f"K {world.kills}/{TOTAL_ENEMIES}  "
-            f"D {world.disks}/{world.disks_total}  "
-            f"L {world.lives}")
+            f"D {world.disks}/{world.disks_total}  ")
     short = (f"K{world.kills}/{TOTAL_ENEMIES} "
-             f"D{world.disks}/{world.disks_total} "
-             f"L{world.lives}")
-    if budget >= len(full) * 6 - 1:
+             f"D{world.disks}/{world.disks_total} ")
+    if budget >= len(full) * 6 - 1 + hp_block_w:
         stat = full
-    elif budget >= len(med) * 6 - 1:
+    elif budget >= len(med) * 6 - 1 + hp_block_w:
         stat = med
     else:
         stat = short
     # HUD text always gold -- 'C' was getting overridden to dark navy in
     # the level-3 cubicle palette, making the stats unreadable.
     fb.blit_text(stat, 2, 1, PAL['Y'])
+    hp_x = 2 + len(stat) * 6 - 1 + 2
+    fb.blit_text("HP ", hp_x, 1, PAL['Y'])
+    pip_x0 = hp_x + hp_label_w
+    pip_full = PAL['Y']
+    pip_empty = (60, 50, 20)
+    for i in range(PLAYER_MAX_HP):
+        col = pip_full if i < world.hp else pip_empty
+        fb.fill_rect(pip_x0 + i * (pip_w + pip_gap), 2, pip_w, 5, col)
     if weapon_text:
         fb.blit_text(weapon_text, fb.w - weapon_w - 2, 1, PAL['Y'])
 
@@ -2940,7 +2942,7 @@ def _draw_certificate(fb, world):
     accent = PAL['Y']
     k, t = world.kills, TOTAL_ENEMIES
     d, dt = world.disks, world.disks_total
-    L = world.lives
+    L = world.hp
 
     if fb.w >= 160 and fb.h >= 100:
         # Full: 7 lines, max 137 px wide, fits 160x100+
@@ -2949,7 +2951,7 @@ def _draw_certificate(fb, world):
             ("STATUS:    VANQUISHED",         text_col),
             (f"GHOULS:    {k} / {t}",         text_col),
             (f"DISKS:     {d} / {dt}",        text_col),
-            (f"LIVES:     {L}",               text_col),
+            (f"HP:        {L}",               text_col),
             ("LICENSE:   WTFPL",              text_col),
             (".ANXIETY DELETED.",             accent),
         ]
@@ -2959,7 +2961,7 @@ def _draw_certificate(fb, world):
             ("ROOT GRANTED!",                  border),
             (f"GHOULS:  {k}/{t}",              text_col),
             (f"DISKS:   {d}/{dt}",             text_col),
-            (f"LIVES:   {L}",                  text_col),
+            (f"HP:      {L}",                  text_col),
             (".ANXIETY DELETED.",              accent),
         ]
     elif fb.h >= 60:
